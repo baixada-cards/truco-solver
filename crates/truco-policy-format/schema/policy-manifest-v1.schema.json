@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://baixada.cards/schemas/truco-policy-manifest-v1.schema.json",
+  "title": "Baixada Truco policy bundle manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "profiles"],
+  "properties": {
+    "format": {
+      "const": "truco-policy-bot/v1"
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["score", "tc", "dealer", "file"],
+        "properties": {
+          "score": {
+            "type": "array",
+            "prefixItems": [
+              { "type": "integer", "minimum": 0, "maximum": 255 },
+              { "type": "integer", "minimum": 0, "maximum": 255 }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "tc": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "dealer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "file": {
+            "type": "string",
+            "pattern": "^[^/\\\\]+\\.tpb$"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "truco-policy-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Versioned policy interchange contract for Baixada Truco"
+
+[dependencies]
+ahash = "0.8"
+memmap2 = "0.9.11"
+serde.workspace = true
+serde_json.workspace = true
+smallvec = { version = "1.11", features = ["serde"] }
+thiserror.workspace = true
+truco-engine.workspace = true

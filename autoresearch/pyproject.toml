@@ -1,0 +1,25 @@
+[project]
+name = "truco-autoresearch"
+version = "0.1.0"
+description = "Automated CFR algorithm research for Truco solver"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.40",
+    "openai>=1.0",
+    # Tracking client only (no server/UI); enough to log params/metrics/artifacts
+    # to a local file store or a remote tracking server.
+    "mlflow-skinny>=2.20",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.11",
+]
+
+[tool.uv]
+exclude-newer = "7 days"
+package = false
+
+[tool.uv.pip]
+exclude-newer = "7 days"

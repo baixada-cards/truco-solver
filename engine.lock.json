@@ -1,0 +1,7 @@
+{
+  "format": "baixada-engine-lock/v1",
+  "repository": "https://github.com/baixada-cards/truco-engine",
+  "revision": "5e67d19a710c8396a44dc51e8fae14f12201a3d4",
+  "package": "truco-engine",
+  "version": "0.1.0"
+}

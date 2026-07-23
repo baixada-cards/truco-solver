@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/truco-policy-format",
+    "crates/truco-solver",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Elvis Sikora", "Baixada contributors"]
+repository = "https://github.com/baixada-cards/truco-solver"
+
+[workspace.dependencies]
+rand = "0.8"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+thiserror = "2.0"
+truco-engine = { git = "https://github.com/baixada-cards/truco-engine", rev = "5e67d19a710c8396a44dc51e8fae14f12201a3d4" }
+truco-policy-format = { path = "crates/truco-policy-format" }

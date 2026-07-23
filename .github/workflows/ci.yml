@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+          checksum: e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
+          download-from-astral-mirror: false
+          enable-cache: false
+          python-version: "3.12"
+
+      - name: Install Socket Firewall
+        env:
+          SFW_SHA256: 4dc46b626a7c5b81c0b54e1984ee53be5a628dbfb2f55ab14e9b04c8a134db6a
+          SFW_URL: https://github.com/SocketDev/sfw-free/releases/download/v1.13.1/sfw-free-linux-x86_64
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "$SFW_URL" \
+            --output "$RUNNER_TEMP/sfw"
+          echo "$SFW_SHA256  $RUNNER_TEMP/sfw" | sha256sum --check -
+          install -m 0755 "$RUNNER_TEMP/sfw" "$RUNNER_TEMP/bin/sfw"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Sync locked dependencies
+        run: |
+          sfw cargo fetch --locked
+          sfw uv sync --project autoresearch --frozen --group dev
+
+      - name: Check
+        run: make check
