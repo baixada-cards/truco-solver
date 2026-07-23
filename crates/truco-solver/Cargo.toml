@@ -9,7 +9,7 @@ truco-engine.workspace = true
 truco-policy-format.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-bincode = "1.3"
+bincode = "2.0"
 rand = { workspace = true }
 ahash = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
