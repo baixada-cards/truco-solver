@@ -188,4 +188,17 @@ arena builds to hit the ≤64 GB target:
       (`DenseAccum::current_row`; commits 86984b3, 53823c9). Toy probe
       after fix beats the monolithic control (0.000239 vs 0.000354).
       4 runs, $3.35. `SOLVER_BENCHMARKS.md` 2026-07-21.
-- [ ] Phase 5 — composed deep-cell benchmark
+- [x] Phase 5 (probe) — COMPLETE 2026-07-23, $7.55 of a $10 cap. 0×0
+      solves + certifies on ONE 128 GB commodity box (n2d-highmem-16 spot,
+      $0.24/hr): init 88 min, parallel certificate 10.6 min, raw ε 0.246
+      @ 3 rounds (on the 1/t curve), peak RSS 124.5 GiB, 15.74 GiB
+      checkpoint resumed across zones/SKUs/provisioning models. Three
+      production bugs found+fixed (boundary-state OOM → replay seeds
+      ce4f05d; sequential cert → subgame-parallel bcb24234; post-cert
+      artifact OOM → open, fix pattern known). ε=0.01 extrapolation:
+      $9–45/cell·tc·dealer at current code, $2–5 with arena caching +
+      R>1 (unbuilt). `SOLVER_BENCHMARKS.md` 2026-07-23.
+- [ ] Phase 5 (tail, deferred): $0.50 post-fix round-cost pin; streamed
+      artifact write (fixes the post-cert OOM); arena NVMe cache + R>1
+      amortization; then the r150 certified cell if/when funded — resumes
+      the retained checkpoint at zero waste.

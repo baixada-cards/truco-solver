@@ -2172,6 +2172,31 @@ ever going to move by construction.
     3+4 together: 8 spot runs, $6.70, every negative result caught by a
     backstop or a certificate rather than a budget.
 
+35. **The wall cell runs on a commodity box (2026-07-23, plan 84 Phase 5
+    probe, $7.55 of a $10 cap).** 0×0 — the symmetric deep cell that no
+    lossless prune touched and that priced at a 1.54 TB premium machine —
+    solved 3 CFR-D rounds and produced a certified exploitability on ONE
+    128 GB spot VM at $0.24/hr. The decomposition stack that did it:
+    trunk-only arena (~1% of nodes), per-subgame local registries as
+    compact accumulator indices, ~40-byte boundary replay seeds (the fix
+    for a 124.5 GiB OOM — storing a TraversalState per crossing was
+    ~78 GB nobody had priced), f32 accumulators, and a subgame-parallel
+    streaming certificate (10.6 min; its sequential predecessor blew a
+    4-hour backstop with 15 of 16 cores idle). Raw ε 0.246 at 3 effective
+    rounds — exactly the 1/t curve — so ε=0.01 is ~150 rounds and
+    extrapolates to $9–45/cell·tc·dealer at current code, $2–5 after
+    arena caching + sweep amortization. Nine attempts: 6 spot
+    preemptions, 2 zone stockouts (the day's "preemption storm" was
+    partly a REGION-WIDE n2 capacity outage — the n2d pool was stocked
+    and cheaper), 1 post-certificate OOM in the artifact tail (open,
+    streaming-write fix known). The 15.74 GiB checkpoint rode through
+    every failure across 4 zones, 2 machine families, and both
+    provisioning models — the checkpoint-first design turned a hostile
+    spot market into a sequence of sub-dollar losses. Strategy settled
+    with the owner: ε=0.01 as the grid-wide stopping rule, checkpoints
+    retained, teacher-grade 2.5e-4 (~0.0125 pp) bought later by resuming
+    — iterations compose additively, so deferring depth costs nothing.
+
 ---
 
 ## Technical choices worth documenting

@@ -408,18 +408,20 @@ fn deep_exploitability(
     score: &Score,
     match_values: &crate::match_value::MatchValueTable,
     ctx: ReplayCtx<'_>,
+    pool: Option<&rayon::ThreadPool>,
 ) -> f64 {
-    // Per-tree boundary injection for each BR player. Each subgame arena is
-    // built once (outer loop) so the streaming certificate never holds more
-    // than one subgame arena at a time.
-    let mut inject: [Vec<Vec<(game_tree::NodeId, f64)>>; 2] =
-        [vec![Vec::new(); n_trees], vec![Vec::new(); n_trees]];
-    for (si, sg) in subgames.iter().enumerate() {
+    // Per-subgame BR read-outs are independent; run them subgame-parallel
+    // (attempt-9 lesson: the sequential certificate left 15 of 16 cores idle
+    // and blew the 4h backstop at 0x0). Each worker holds one arena; peak
+    // extra memory ≈ jobs × largest-subgame arena. Determinism: the per-tree
+    // inject lists are sorted by node id below, so fold order is irrelevant.
+    let per_sg = |(si, sg): (usize, &SubgameState)| -> [Vec<(u32, game_tree::NodeId, f64)>; 2] {
         let arena = sg.arena(keep_arenas, ctx);
         let a = arena.get();
         let n_members = sg.trunk_node.len();
         let member_nodes: Vec<(u32, game_tree::NodeId)> =
             (0..n_members).map(|i| (i as u32, 0)).collect();
+        let mut out: [Vec<(u32, game_tree::NodeId, f64)>; 2] = [Vec::new(), Vec::new()];
         for br_player in [0u8, 1u8] {
             // Member root weights = opponent trunk reach into the boundary
             // (reach_excluding(excluded=br) × deal weight, folded into init).
@@ -438,9 +440,28 @@ fn deep_exploitability(
                 &member_nodes,
                 Some(&root_w),
             );
-            for i in 0..n_members {
-                inject[br_player as usize][sg.trunk_tree_idx[i] as usize]
-                    .push((sg.trunk_node[i], vals[i]));
+            out[br_player as usize] = (0..n_members)
+                .map(|i| (sg.trunk_tree_idx[i], sg.trunk_node[i], vals[i]))
+                .collect();
+        }
+        out
+    };
+    let results: Vec<[Vec<(u32, game_tree::NodeId, f64)>; 2]> = match pool {
+        Some(pl) => pl.install(|| {
+            subgames
+                .par_iter()
+                .enumerate()
+                .map(|(i, s)| per_sg((i, s)))
+                .collect()
+        }),
+        None => subgames.iter().enumerate().map(per_sg).collect(),
+    };
+    let mut inject: [Vec<Vec<(game_tree::NodeId, f64)>>; 2] =
+        [vec![Vec::new(); n_trees], vec![Vec::new(); n_trees]];
+    for r in &results {
+        for br_player in [0usize, 1usize] {
+            for &(t, n, v) in &r[br_player] {
+                inject[br_player][t as usize].push((n, v));
             }
         }
     }
@@ -908,6 +929,7 @@ pub fn deep_solve(
             score,
             match_values,
             ctx,
+            pool.as_ref(),
         )
     };
 
