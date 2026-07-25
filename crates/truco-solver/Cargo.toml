@@ -16,7 +16,6 @@ smallvec = { version = "1.11", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
 indicatif = "0.18"
-atty = "0.2"
 rayon = "1.10"
 memmap2 = "0.9.11"
 
