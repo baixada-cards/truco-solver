@@ -19,11 +19,11 @@ dev = [
 
 [tool.uv]
 exclude-newer = "7 days"
-# GHSA security update: mlflow-skinny 3.14.0 requires GitPython 3.1.54,
-# published 2026-07-22. Permit that exact release before the normal age gate.
-exclude-newer-package = { gitpython = "2026-07-23T00:00:00Z" }
+# GHSA security update: permit fully patched GitPython 3.1.55, published
+# 2026-07-23, before the normal age gate.
+exclude-newer-package = { gitpython = "2026-07-24T00:00:00Z" }
 package = false
 
 [tool.uv.pip]
 exclude-newer = "7 days"
-exclude-newer-package = { gitpython = "2026-07-23T00:00:00Z" }
+exclude-newer-package = { gitpython = "2026-07-24T00:00:00Z" }
