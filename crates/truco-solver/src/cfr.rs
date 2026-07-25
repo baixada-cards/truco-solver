@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -1001,7 +1002,7 @@ where
 
     // Within-iteration progress bar — hidden if stderr is not a tty
     // (e.g. when the output is being piped) so control codes don't corrupt logs.
-    let is_tty = atty::is(atty::Stream::Stderr);
+    let is_tty = std::io::stderr().is_terminal();
     let num_entries = prebuilt.entries.len() as u64;
     let pb = if is_tty {
         let bar = ProgressBar::new(num_entries);
