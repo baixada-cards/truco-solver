@@ -214,9 +214,23 @@ If resuming, these are the live threads, roughly by promise:
    The one production lesson: intra-round couplings must read the CURRENT
    regret-matching iterate, not the lagging average (a ~0.018 plateau
    otherwise; three-certificate diagnostic + fix in `SOLVER_BENCHMARKS.md`
-   2026-07-21). 8 runs, $6.70 total across Phases 3–4. Remaining for the
-   deep-band payoff: the composed deep-cell benchmark on commodity boxes
-   (Phase 5 — trunk-only arenas + per-subgame remapping + fleet shape).
+   2026-07-21). 8 runs, $6.70 total across Phases 3–4. **DEEP-CELL PROBE
+   COMPLETE (2026-07-23, plan 84 Phase 5, $7.55):** 0×0 — the wall cell
+   itself, 3.81 B nodes that priced at 1.54 TB monolithic — solves and
+   certifies on ONE 128 GB commodity box ($0.24/hr n2d spot): trunk-only
+   arena + per-subgame local registries + replay seeds + f32 accums; init
+   88 min, subgame-parallel streaming certificate 10.6 min, raw ε 0.246 @
+   3 rounds (on the 1/t curve), 15.74 GiB checkpoint proven across
+   zones/SKUs. ε=0.01 extrapolates to $9–45/cell·tc·dealer at current
+   code, ~$2–5 with arena caching + R>1 (unbuilt) — the whole-grid ~$3–4K
+   figure now rests on measured constants, and teacher-grade 2.5e-4
+   (~0.0125 pp) is a later ~10×-iterations resume from retained
+   checkpoints, not a redo. Caveat: benchmark ran a SYNTHETIC-complete mv
+   table (0×0's successors were never solved) — cost transfers exactly,
+   the strategy content is not shippable. Remaining tail:
+   post-fix round-cost pin (~$0.50), streamed artifact write (post-cert
+   OOM fix, pattern known), arena NVMe cache, fleet shape. See
+   `SOLVER_BENCHMARKS.md` 2026-07-23.
 
 ---
 

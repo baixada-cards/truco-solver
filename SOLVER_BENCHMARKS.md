@@ -2439,6 +2439,75 @@ production-scale 10×10 ground-truth run on GCP.
 
 ---
 
+## 2026-07-23 — Phase 5 probe complete: 0×0 solves + certifies on one 128 GB commodity box ($7.55 of a $10 cap, 9 attempts)
+
+Plan 84 Phase 5's question — does the decomposed deep path make the
+symmetric wall cells commodity-box problems — is answered YES, with every
+cost constant measured. Cell: 0×0 tc0/d0 (≡1×1 bit-for-bit), all 140,118
+deals, 3,135 subgames, `--deep --jobs 16`, `accum-f32`, SYNTHETIC-complete
+match-value table (`examples/gen_mv.rs` — 0×0's successors span the
+never-solved grid; identical tree/arithmetic, so cost transfers exactly;
+strategy content does not — this is a $/cell benchmark, not a shippable
+0×0 policy).
+
+**Measured (definitive numbers from attempts 5 and 10):**
+
+| quantity | value |
+|---|---:|
+| init (trunk arena + 3,135 subgame builds + 15.7 GiB ckpt resume) | 88.4 min |
+| per alternation round, (T,R)=(1,1), rebuild mode, PRE-seeds-fix | 70–85 min (near-OOM page pressure; see band below) |
+| streaming certificate, SUBGAME-PARALLEL (bcb24234) | **10.6 min** (≥14× vs the sequential version that blew a 4h backstop) |
+| raw ε after 3 effective rounds | **0.24585** (1/t curve: 0.9/3 ≈ 0.3 ✓) |
+| peak RSS | 124.5 GiB on 128 GiB (fits; jobs=16 cert leaves ~zero headroom — use cert jobs≈8) |
+| checkpoint | 15.74 GiB, atomic, resumed across 4 zones + 2 machine families + spot/on-demand |
+| box | n2d-highmem-16 SPOT $0.24/hr (n2d pool was stocked when n2 was exhausted region-wide) |
+
+**The three bugs the probe existed to find** (each caught for <$2):
+1. Boundary-state capture OOM — a full `TraversalState` per crossing ≈
+   78 GB at 0×0 (124.5 GiB OOM at 88 min). Fixed: ~40-byte replay seeds
+   (`replay_crossing_state`, commit ce4f05d); deep gates bit-identical.
+2. Sequential certificate — 15 of 16 cores idle, >2.4 h, blew the 4 h
+   backstop on-demand. Fixed: subgame-parallel (bcb24234), 10.6 min.
+3. Post-certificate artifact OOM (open, logged): `deep_solve` returns the
+   composed profile as a ~757 M-row HashMap + clones rows; killed (signal
+   9) AFTER the certificate printed. Fix pattern known: stream artifact
+   rows like the phase-9c dense-direct writes. Blocks nothing measured.
+
+**Per-round cost band and what it means.** The 70–85 min round figure was
+measured before the seeds fix, at 124 GiB RSS (page-cache starvation), on
+the slower n2 SKU. The parallel certificate — comparable node work — now
+takes 10.6 min post-fix on n2d. True post-fix round cost is therefore
+somewhere in **15–75 min**; one $0.50 spot run (3 rounds, resume) pins it.
+Extrapolation to ε=0.01 (~150 effective rounds) at $0.24/hr:
+
+| scenario | $/cell·tc·dealer |
+|---|---:|
+| current code, pessimistic (75 min/round) | ~$45 |
+| current code, optimistic (15 min/round, post-fix) | ~$9 |
+| + arena NVMe cache / keep-arenas + R>1 amortization (unbuilt) | ~$2–5 |
+
+Even the pessimistic bound beats the never-provisionable 1.54 TB
+monolithic box; the optimistic + engineering band is what makes the
+whole-grid ~$3–4K Fermi (and the §teacher-grade ~10× ladder on top of it)
+real. ε=2.5e-4 ≡ ~0.0125 pp equity costs ~10× the ε=0.01 iterations
+(SyncCFR+ 1/t, measured at 10×10: 90 iters→0.0095, ~900→2.5e-4) and can
+be bought LATER from the retained checkpoint at zero waste — iterations
+compose additively (checkpoint-chunking gate is bit-exact).
+
+**Ops runbook proven** (the fleet playbook the full grid needs): 6 spot
+preemptions + 2 stockouts + 1 phantom create ridden out; incremental
+uploader (log + stderr + checkpoint every 300s) made every death cheap;
+DEEP_PHASE timers on stderr because Rust block-buffers stdout to files;
+3-consecutive-miss VM-gone detection (list API false-negatives); machine-
+family failover n2→n2d (separate capacity pools, n2d cheaper); on-demand
+escalation only for the unfinishable-under-preemption stage. Attempt
+ledger: $0.04 mv-panic, $0.66 + $0.71 OOM pair, $0.08 mercy-kill, $1.64
+preempted-at-3.4h (completed all 3 rounds — checkpoint saved it), ~$0.10
+phantom/stockouts, $3.60 on-demand 4h-cap (sequential-cert lesson),
+$0.40 the run that landed everything. **Total $7.55 of the $10 cap.**
+
+---
+
 ## 2026-07-21 — Phase 4: from-scratch trunk-CFR at 10×10 certifies 1.1e-3, gv to 5.5e-5 of ground truth (4 runs, $3.35)
 
 Plan 84 Phase 4 complete: `solve trunk-solve` solves 10×10 tc0/d0 (all
