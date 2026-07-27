@@ -167,6 +167,9 @@ fn main() {
             eprintln!(
                 "       [--checkpoint PATH --checkpoint-every N] [--resume]]  # Phase-5 deep cell"
             );
+            eprintln!("       # --resume may RAISE --rounds (never lower it below the");
+            eprintln!("       # rounds already complete): extending a checkpoint is");
+            eprintln!("       # bit-identical to having asked for the longer run up front.");
             eprintln!("       [--arena-cache DIR|off]  # per-subgame arena packs on disk;");
             eprintln!("         default ON at <checkpoint>.arenas when --checkpoint is set,");
             eprintln!("         OFF otherwise. First build of each subgame arena is packed,");

@@ -916,6 +916,9 @@ pub fn deep_solve(
         }
     }
 
+    // Warm-up anchor: the round at which averaging restarts and the CBV tail
+    // window opens. Always derived from the CURRENT `--rounds`, including on a
+    // resume that extends the budget — see the resume block.
     let warmup = cfg.rounds / 2;
     let mut trunk_iter: u64 = 0;
     let mut sub_iter_base: u64 = 0;
@@ -949,7 +952,15 @@ pub fn deep_solve(
             assert_eq!(saved.tc_level, tc.blocked_plain_level, "checkpoint tc echo");
             assert_eq!(saved.dealer, dealer, "checkpoint dealer echo");
             assert_eq!(saved.deal_count, deals.len(), "checkpoint deal-count echo");
-            assert_eq!(saved.rounds, cfg.rounds, "checkpoint rounds echo");
+            // RESUME-EXTEND: the round budget may GROW ("solve to eps=0.01
+            // now, extend to 2.5e-4 later" — iterations compose additively).
+            // It may never shrink below what is already complete.
+            assert!(
+                cfg.rounds >= saved.next_round,
+                "checkpoint has {} rounds complete; --rounds {} would discard work",
+                saved.next_round,
+                cfg.rounds
+            );
             assert_eq!(
                 saved.trunk_iters, cfg.trunk_iters,
                 "checkpoint trunk_iters echo"
@@ -958,7 +969,33 @@ pub fn deep_solve(
                 saved.subgame_iters, cfg.subgame_iters,
                 "checkpoint subgame_iters echo"
             );
-            assert_eq!(saved.warmup, warmup, "checkpoint warmup echo");
+            // The warm-up anchor is RE-DERIVED from the new `--rounds`, not
+            // taken from the checkpoint. The alternative (keep `saved.warmup`)
+            // leaves an extended run averaging and folding CBVs from the
+            // ORIGINAL, far less converged midpoint: measured 0.067 raw eps
+            // for a 3→6 extension against 0.0132 for a straight 6-round run on
+            // the toy cell — the 2026-07-21 lagging-average family of error.
+            //
+            // Re-anchoring is only safe because the anchor CLEARS the CBV
+            // numerator/denominator maps as well as the strategy sums (see the
+            // `round == warmup` block). Without that clear, the tail window
+            // would open on top of CBV mass folded before the new anchor —
+            // double-counting pre-warmup mass into a window that must start
+            // empty. With it, an extension is EXACTLY a straight run of the new
+            // length: the regret state is iteration-count-independent here
+            // (regret pruning is off on this path, so `iteration` only weights
+            // the strategy sum, which the anchor discards), so
+            // `deep_resume_extend_matches_straight_run` holds bit-for-bit.
+            //
+            // Degradation is graceful: extending PAST the new midpoint (new
+            // rounds < 2 × completed rounds) simply never fires the anchor
+            // again and keeps the original window.
+            if saved.warmup != warmup {
+                eprintln!(
+                    "DEEP_PHASE warmup_reanchored from={} to={} completed={}",
+                    saved.warmup, warmup, saved.next_round
+                );
+            }
             assert_eq!(
                 saved.subgame_count,
                 subgames.len(),
@@ -1000,6 +1037,15 @@ pub fn deep_solve(
             }
             trunk_iter = 0;
             sub_iter_base = 0;
+            // The tail window must OPEN EMPTY. In a straight run these maps are
+            // already empty (folding starts at `warmup`), so this is a no-op;
+            // on a resume that extended the budget it discards the shorter
+            // run's tail folds, which is what makes an extension equivalent to
+            // having asked for the longer run up front.
+            for o in 0..2 {
+                cbv_num[o].clear();
+                cbv_den[o].clear();
+            }
         }
 
         // Trunk phase (single-threaded).
@@ -1838,6 +1884,116 @@ mod tests {
         assert_eq!(meta.num_info_sets, seen);
         assert_eq!(meta.score, (score.zero, score.one));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resume-EXTEND: a checkpoint written by a shorter run continues under a
+    /// larger `--rounds`, and the result is BIT-IDENTICAL to having asked for
+    /// the longer run up front — from either a 2-round or a 3-round
+    /// checkpoint. This is the "solve to eps=0.01 now, extend to 2.5e-4 later
+    /// at zero waste" contract; it holds because the warm-up anchor is
+    /// re-derived from the new budget and clears both the strategy sums and
+    /// the CBV tail window (see the resume block).
+    #[test]
+    fn deep_resume_extend_matches_straight_run() {
+        let (score, tc, deals, mv) = setup(24);
+        let root = std::env::temp_dir().join(format!("deep_extend_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let run = |rounds: usize, ck: Option<&CheckpointCfg>| {
+            deep_solve(
+                &score,
+                tc,
+                &deals,
+                0,
+                TreeRules::Current,
+                &mv,
+                cfg(rounds, 1, false),
+                ck,
+                None,
+                None,
+            )
+        };
+        let ck = |path: &std::path::Path, resume: bool| CheckpointCfg {
+            path: path.to_path_buf(),
+            every: 1,
+            resume,
+            stop_after: None,
+        };
+
+        let straight = run(6, None);
+        for short in [2usize, 3] {
+            let path = root.join(format!("from{short}.ckpt"));
+            run(short, Some(&ck(&path, false)));
+            let extended = run(6, Some(&ck(&path, true)));
+            assert_eq!(
+                extended.raw_eps, straight.raw_eps,
+                "raw eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.composed_eps, straight.composed_eps,
+                "composed eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.composed_eps_tail, straight.composed_eps_tail,
+                "tail eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.composed_eps_br, straight.composed_eps_br,
+                "br eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.game_value, straight.game_value,
+                "game value extending {short}->6"
+            );
+            assert_eq!(extended.total_visits, straight.total_visits);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Shrinking below completed work is still refused.
+    #[test]
+    #[should_panic(expected = "would discard work")]
+    fn deep_resume_cannot_shrink_below_completed_rounds() {
+        let (score, tc, deals, mv) = setup(24);
+        let root = std::env::temp_dir().join(format!("deep_shrink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("deep.ckpt");
+        deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(4, 1, false),
+            Some(&CheckpointCfg {
+                path: path.clone(),
+                every: 1,
+                resume: false,
+                stop_after: None,
+            }),
+            None,
+            None,
+        );
+        deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(2, 1, false),
+            Some(&CheckpointCfg {
+                path,
+                every: 1,
+                resume: true,
+                stop_after: None,
+            }),
+            None,
+            None,
+        );
     }
 
     /// Gate D: the decomposed streaming certificate equals the in-memory
