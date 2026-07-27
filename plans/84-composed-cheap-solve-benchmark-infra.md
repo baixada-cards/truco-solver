@@ -221,10 +221,14 @@ arena builds to hit the ≤64 GB target:
             local `table_idx`, not the map.
 - [ ] Phase 5 (tail, PRODUCTION SCALE) — **awaiting funding**; nothing below
       is blocked by code any more:
-      - [ ] The $0.50 spot round-cost pin at 0×0 (3 rounds, resume from the
-            retained 15.74 GiB checkpoint) — turns the 15–75 min/round band
-            into a measurement, now also measuring the arena cache's effect
-            at real scale rather than extrapolating the local 3.3×.
+      - [x] Round-cost pin DONE 2026-07-27 ($0.82, run
+            `deep-pin-0x0-r6-20260727`): rounds 4–6 off the arena cache at
+            6.5–9.5 min (~8× the pre-fix 75 min); resume-extend's first
+            production use worked (`warmup_reanchored 1→3`). 0×0 r150 job
+            ≈ 26 box-hours ≈ $6.3 spot; warm whole-grid ≈ 3,000–4,200
+            box-hours. Peak RSS 85.6 GiB (96–128 GB boxes remain the spec).
+            `SOLVER_BENCHMARKS.md` 2026-07-27. Round-6 checkpoint retained
+            in GCS alongside the round-3 one.
       - [ ] The r150 certified 0×0 cell (ε≈0.01), and the r1500 extension to
             ε≈2.5e-4 on top of it — the extension is now genuinely
             incremental (resume-extend), so the two can be bought separately.

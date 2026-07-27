@@ -2439,6 +2439,43 @@ production-scale 10×10 ground-truth run on GCP.
 
 ---
 
+## 2026-07-27 — Round-cost pin: 0×0 rounds at 6.5–9.5 min off the arena cache (~8× pre-fix), $0.82
+
+The plan-84 "$0.50 pin" ran on the merged tail optimizations (main
+`4c80cfd`): resumed the retained 0×0 round-3 checkpoint via resume-extend
+(first production use — `warmup_reanchored from=1 to=3` fired as designed)
+and ran rounds 4–6 with the per-subgame arena cache, `--certify skip`,
+n2d-highmem-16 SPOT us-east4-b, accum-f32, jobs=16, all 140,118 deals.
+
+| quantity | value |
+|---|---:|
+| init (ckpt download + builds + writing all arena packs) | 111.1 min |
+| round 4 (cache-hit, pre-CBV-window) | 390.3 s |
+| rounds 5–6 (cache-hit, CBV folds active) | 546.4 / 571.7 s |
+| peak RSS (incl. jobs=16 pack-building init) | 85.6 GiB |
+| wall / cost | 2:33:21 / ≈$0.82 |
+
+**Per-round cost is pinned at ~9.5 min** (CBV-active, the steady state) —
+~8× the pre-optimization ~75 min. The 0×0-scale r150 job now prices at
+**≈26 box-hours ≈ $6.3** on $0.24/hr spot (init 1.9 h + 150×9.5 min +
+~11 min certificate). Updated whole-grid extrapolation (node-weighted
+tiers, ÷0.89 full-tier share): **~6,700 box-hours cold**, **~3,000–4,200
+with neighbor warm starts** (the historical 1.6–2.25× iteration cut, still
+unmeasured at deep cells) — ≈$720–1,600 on GCP spot, ≈$300–670 on
+Hetzner-class dedicated iron at ~$0.10/hr.
+
+Honest revisions vs the 2026-07-23 band: rounds landed 3× above the
+sweep-only optimistic guess (CBV folds + boundary evals + 15.7 GiB
+checkpoint writes are real work), so the engineered $2–5/cell becomes a
+measured **~$6.3/cell** at 0×0 scale; and peak RSS 85.6 GiB means a 64 GB
+box is NOT yet proven for the deepest cells (bounding concurrent
+pack-building at init would likely fix this; 96–128 GB is the safe spec
+today). Interruption cost at deep cells is ~1.9 h of re-init unless the
+trunk/pack cache is also persisted across VMs — a known, unbuilt, bounded
+item.
+
+---
+
 ## 2026-07-23 — Phase 5 probe complete: 0×0 solves + certifies on one 128 GB commodity box ($7.55 of a $10 cap, 9 attempts)
 
 Plan 84 Phase 5's question — does the decomposed deep path make the
