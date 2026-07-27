@@ -2652,3 +2652,93 @@ Box implication: trunk-only build (~37.6M nodes, sub-GB) + on-demand
 per-subgame builds (largest ~14M nodes) + compact per-subgame accumulators keep
 0×0 well inside a 64–128 GB box; the ~250 GB full-arena path is what the Phase-5
 infra (trunk-only + per-subgame arenas + compact accums) removes.
+
+---
+
+## 2026-07-27 — Plan 84 Phase 5 tail: streamed artifact, arena cache, resume-extend, cert-jobs ($0, local)
+
+The four deferred items from the 2026-07-23 Phase-5 probe, built and gated
+locally. Cell: 8×8 tc0/d0, strided deal subsets, `--rounds 6 --trunk-sweeps 1
+--subgame-iters 1 --certify raw`, release build, f64 accumulators, on an M-series
+laptop (24 GB). Everything below is a LOCAL measurement — the production-scale
+0×0 numbers still want the $0.50 spot round-pin (see plan 84 status).
+
+**A. Arena mode × jobs — wall and peak RSS.** `--arena-cache DIR` packs each
+subgame's local arena on its first build and memory-maps it every round after;
+`--keep-arenas` holds all of them in RAM; `rebuild` (the old default) replays
+the engine every round.
+
+2,000 deals (990 subgames, 89,148 trunk info sets, 3,838,352 subgame info sets):
+
+| mode | jobs | wall s | peak RSS MB | cert s | raw eps |
+|---|---:|---:|---:|---:|---:|
+| rebuild | 1 | 38.68 | 590.5 | 5.3 | 0.016248627499 |
+| rebuild | 4 | 18.28 | 608.9 | 1.8 | 0.016248627499 |
+| **cache** | 1 | **10.57** | **593.0** | 1.9 | 0.016248627499 |
+| **cache** | 4 | **6.77** | **619.0** | 0.5 | 0.016248627499 |
+| keep | 1 | 7.08 | 1345.5 | 1.4 | 0.016248627499 |
+| keep | 4 | 5.11 | 1353.5 | 0.4 | 0.016248627499 |
+
+6,000 deals (990 subgames), same schedule:
+
+| mode | jobs | wall s | peak RSS MB | cert s | raw eps |
+|---|---:|---:|---:|---:|---:|
+| rebuild | 1 | 114.98 | 1629.0 | 15.8 | 0.015951823535 |
+| rebuild | 4 | 53.29 | 1557.1 | 5.1 | 0.015951823535 |
+| **cache** | 1 | **34.43** | **1674.2** | 5.0 | 0.015951823535 |
+| **cache** | 4 | **19.73** | **1742.0** | 1.6 | 0.015951823535 |
+| keep | 1 | 20.19 | 3339.4 | 3.9 | 0.015951823535 |
+| keep | 4 | 15.07 | 3337.3 | 1.2 | 0.015951823535 |
+
+Reading it:
+
+- **The arena cache buys 3.3–3.7× wall at jobs=1 (2.7× at jobs=4) for
+  0.4–7% peak RSS.** `--keep-arenas` is only ~1.5× faster still and costs
+  **2.0–2.3× peak RSS** — the trade the deep path cannot make at 0×0. Cache
+  is now the default whenever `--checkpoint` is set.
+- Disk cost of the cache: 581 MB at 2,000 deals, 1.5 GB at 6,000 — i.e. it
+  tracks the arena bytes, which is exactly what the mmap keeps OUT of RSS.
+- **raw eps is identical to the last digit across all six configurations** at
+  both scales. Arena mode and pool size are performance knobs only.
+- Init is unchanged (4.1–4.5 s / 12.1–13.4 s): the first build still happens.
+  The cache pays back on rounds 2..N and on every resume.
+
+**B. Streamed composed artifact — the 2026-07-23 post-certificate OOM.**
+Same command with `--composed-out`, 2,000 deals, jobs=1, old binary (main,
+d1ec412) vs new:
+
+| | peak RSS MB | wall s | rows | file bytes |
+|---|---:|---:|---:|---:|
+| before (whole-profile HashMap + full-arena rebuild) | 2688.6 | 44.68 | 3,869,366 | 489,742,845 |
+| after (streamed per subgame) | **618.7** | 42.63 | 3,869,366 | 489,742,845 |
+
+**4.35× lower peak RSS, same rows, same file size**, and the artifact write
+itself now costs +28 MB over the same solve without `--composed-out` (590.5 →
+618.7). `compare-policies` on the two artifacts: `rows_a=rows_b=matched=
+3,869,366, only_a=0, only_b=0, max TV = 0.000000, argmax_agree=1.0000` at every
+depth — content-identical, only row ORDER differs (streams trunk-first then
+subgame-major instead of key-sorted). The old path's memory scaled with the
+whole profile AND rebuilt the full arena just to enumerate keys; at 0×0 that is
+~757 M rows, which is what died after the certificate printed.
+
+**C. Resume-extend.** A checkpoint can now raise `--rounds` (never lower it
+below completed rounds). Extending a 2-round OR a 3-round checkpoint to 6
+rounds reproduces a straight 6-round run's raw / tail / br / composed
+certificates and game value under exact f64 equality. This required
+re-anchoring the warm-up from the NEW budget and clearing the CBV tail maps at
+the anchor; keeping the saved anchor instead measured raw eps 0.067 for a 3→6
+extension against 0.0132 straight — the 2026-07-21 lagging-average error in a
+new costume. "Solve to eps=0.01 now, extend later at zero waste" is now
+literally true rather than approximately true.
+
+**D. Cert-jobs.** `--cert-jobs` (default `min(jobs, 8)`) sizes the certificate
+pool alone. Not a local win — it exists because the 0×0 certificate at
+`--jobs 16` peaked at 124.5 GiB of a 128 GiB box (2026-07-23) with each BR
+worker holding a whole subgame arena.
+
+Gates: the 5 pre-existing deep equivalence tests plus 4 new ones
+(`deep_arena_cache_matches_rebuild`, `deep_streamed_artifact_matches_in_memory_profile`,
+`deep_resume_extend_matches_straight_run`,
+`deep_resume_cannot_shrink_below_completed_rounds`). `make check` green.
+
+Cost: $0 — entirely local, no cloud, no full-deal builds.

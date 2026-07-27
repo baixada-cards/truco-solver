@@ -198,7 +198,35 @@ arena builds to hit the ≤64 GB target:
       artifact OOM → open, fix pattern known). ε=0.01 extrapolation:
       $9–45/cell·tc·dealer at current code, $2–5 with arena caching +
       R>1 (unbuilt). `SOLVER_BENCHMARKS.md` 2026-07-23.
-- [ ] Phase 5 (tail, deferred): $0.50 post-fix round-cost pin; streamed
-      artifact write (fixes the post-cert OOM); arena NVMe cache + R>1
-      amortization; then the r150 certified cell if/when funded — resumes
-      the retained checkpoint at zero waste.
+- [x] Phase 5 (tail, ENGINEERING) — COMPLETE 2026-07-27, $0, local
+      (`SOLVER_BENCHMARKS.md` 2026-07-27):
+      - [x] Streamed composed artifact — fixes the post-certificate OOM.
+            `deep_solve` takes an artifact sink and streams rows subgame by
+            subgame; no whole-profile map, no cloned rows, no full-arena
+            rebuild. Measured 4.35× lower peak RSS at 8×8/2,000 deals, output
+            content-identical (max TV 0.000000 over 3.87 M rows).
+      - [x] Arena disk cache (`--arena-cache DIR`, default ON at
+            `<checkpoint>.arenas`) — 3.3–3.7× wall per round at jobs=1 for
+            0.4–7% peak RSS, against 2.0–2.3× RSS for `--keep-arenas`.
+            Bit-identical certificates.
+      - [x] Resume-EXTEND — `--rounds` may grow on resume; extending a
+            checkpoint is bit-identical to having asked for the longer run up
+            front. This is the mechanism the "ε=0.01 now, 2.5e-4 later"
+            strategy assumed but did not have.
+      - [x] `--cert-jobs` (default `min(jobs, 8)`) — bounds the memory-critical
+            certificate pool separately from the round pool.
+      - [x] Key-map compaction: `SubgameState::key_to_local` (~757 M entries
+            ≈ 30 GB at 0×0) DELETED rather than compacted — streaming
+            composition was its only consumer, and the sweeps key off the
+            local `table_idx`, not the map.
+- [ ] Phase 5 (tail, PRODUCTION SCALE) — **awaiting funding**; nothing below
+      is blocked by code any more:
+      - [ ] The $0.50 spot round-cost pin at 0×0 (3 rounds, resume from the
+            retained 15.74 GiB checkpoint) — turns the 15–75 min/round band
+            into a measurement, now also measuring the arena cache's effect
+            at real scale rather than extrapolating the local 3.3×.
+      - [ ] The r150 certified 0×0 cell (ε≈0.01), and the r1500 extension to
+            ε≈2.5e-4 on top of it — the extension is now genuinely
+            incremental (resume-extend), so the two can be bought separately.
+      - [ ] R>1 amortization sweep (`--subgame-iters` > 1) — untouched by this
+            tail; still an open cost lever.
