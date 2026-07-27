@@ -1308,7 +1308,12 @@ fn run_deep_solve(
     });
 
     let t_solve = Instant::now();
-    let (report, composed) = truco_solver::deep::deep_solve(
+    // The composed artifact streams straight to `--composed-out` INSIDE the
+    // solve: the old path returned a whole-profile HashMap (~757 M rows at 0×0)
+    // and then rebuilt the full arena to enumerate keys — the two things the
+    // deep path exists to avoid, and the 2026-07-23 post-certificate OOM.
+    let artifact_path = composed_out.as_ref().map(std::path::PathBuf::from);
+    let report = truco_solver::deep::deep_solve(
         score,
         tc,
         deals,
@@ -1317,6 +1322,9 @@ fn run_deep_solve(
         &mv,
         cfg,
         checkpoint.as_ref(),
+        artifact_path
+            .as_deref()
+            .map(truco_solver::deep::ArtifactSink::File),
     );
     let solve_s = t_solve.elapsed().as_secs_f64();
 
@@ -1350,37 +1358,7 @@ fn run_deep_solve(
     );
 
     if let Some(out) = composed_out {
-        // Stream the composed keyed rows straight to the artifact (subgame rows
-        // already override the inert trunk boundary roots inside `deep_solve`).
-        let built = truco_solver::game_tree::build_all_trees_with_dealer_rules(
-            score,
-            tc,
-            deals,
-            Some(dealer),
-            rules,
-        )
-        .expect("build trees for --composed-out");
-        let meta = SolvedStateMeta {
-            score: (score.zero, score.one),
-            turnup_class: tc,
-            iterations: (rounds as u64) * (trunk_iters + subgame_iters) + final_iters,
-            num_info_sets: built.info_sets.len(),
-        };
-        let rows = built.info_sets.iter().map(|(key, info, actions)| {
-            let probs = composed
-                .get(&key.0)
-                .cloned()
-                .unwrap_or_else(|| truco_solver::strategy::uniform_probs(actions.len()));
-            (key.0, info, actions.clone(), probs)
-        });
-        // Materialize to owned then borrow for save_strategy_rows.
-        let owned: Vec<_> = rows.collect();
-        let borrowed = owned
-            .iter()
-            .map(|(k, info, actions, probs)| (*k, *info, &actions[..], &probs[..]));
-        truco_solver::storage::save_strategy_rows(Path::new(&out), meta, borrowed)
-            .expect("write --composed-out");
-        println!("DEEP_COMPOSED_OUT path={} rows={}", out, owned.len());
+        println!("DEEP_COMPOSED_OUT path={out}");
     }
 
     println!("DEEP_DONE solve_s={:.3}", solve_s);

@@ -137,9 +137,12 @@ struct SubgameState {
     /// Compact replay seeds `(deal_idx, action path, deal_weight)` — member
     /// order; rebuild the local arena via [`ReplayCtx::materialize`].
     seeds: Vec<(u32, Box<[u8]>, f64)>,
-    /// Local info-set count and key→local-index map (stable across rebuilds).
+    /// Local info-set count (stable across rebuilds). The key→local-index map
+    /// `build_subgame_local` also returns is deliberately NOT retained: the only
+    /// consumer was whole-profile composition, which now streams straight out of
+    /// the local arena's `info_sets` (already in local-index order). At 0×0
+    /// those maps summed to ~757 M entries ≈ 30 GB of pure duplicate index.
     n_local: usize,
-    key_to_local: HashMap<InfoSetKey, u32>,
     /// Local node count of each member subtree (for [`ResolveMember`] spans).
     member_nodes: Vec<usize>,
     /// Warm accumulator across rounds.
@@ -215,7 +218,7 @@ fn init_subgame(
         .map(|m| (m.deal_idx, m.path.clone(), m.deal_weight))
         .collect();
     let states = ctx.materialize(&seeds, dealer);
-    let (arena, key_to_local) =
+    let (arena, _key_to_local) =
         game_tree::build_subgame_local(&states, dealer).expect("subgame build");
     let n_local = arena.info_sets.len();
     let dense = cfr::new_resolve_accum(&arena);
@@ -236,7 +239,6 @@ fn init_subgame(
         view: members.iter().map(|m| [m.view_p0, m.view_p1]).collect(),
         seeds,
         n_local,
-        key_to_local,
         member_nodes,
         dense,
         arena: if keep_arenas { Some(arena) } else { None },
@@ -516,6 +518,116 @@ fn composed_boundary_p0(
     per_tree
 }
 
+// ─── Composed-artifact streaming ───────────────────────────────────────────
+
+/// Where [`deep_solve`] should put the composed profile.
+///
+/// `File` is the production path: rows stream to disk subgame by subgame and
+/// nothing whole-profile is ever resident. `Memory` exists for tests at toy
+/// scale — at 0×0 the map it builds is ~757 M rows (the 2026-07-23
+/// post-certificate OOM), so production callers must not use it.
+pub enum ArtifactSink<'a> {
+    File(&'a Path),
+    Memory(&'a mut HashMap<u64, ActionProbs>),
+}
+
+enum SinkImpl<'a> {
+    File(crate::storage::StrategyRowWriter),
+    Memory(&'a mut HashMap<u64, ActionProbs>),
+}
+
+impl SinkImpl<'_> {
+    fn row(
+        &mut self,
+        key: InfoSetKey,
+        info: &crate::info_set::InfoSet,
+        actions: &[crate::info_set::AbstractAction],
+        probs: &ActionProbs,
+    ) {
+        match self {
+            SinkImpl::File(w) => w
+                .write_row(key.0, info, actions, &probs[..])
+                .expect("stream composed row"),
+            SinkImpl::Memory(m) => {
+                m.insert(key.0, probs.clone());
+            }
+        }
+    }
+
+    fn finish(self) {
+        if let SinkImpl::File(w) = self {
+            w.finish().expect("finish composed artifact");
+        }
+    }
+}
+
+/// Trunk info-set indices that are INERT boundary roots: the trunk registers
+/// them (each crossing is a truncated `Player` leaf) but never trains them, and
+/// the owning subgame's local registry holds the same key with the trained row.
+/// Excluding them from the trunk half of the stream makes the composed artifact
+/// duplicate-free — i.e. exactly the key set the old in-memory composition
+/// produced with `entry().or_insert()`.
+fn inert_boundary_infosets(trunk: &PrebuiltTrees, subgames: &[SubgameState]) -> Vec<bool> {
+    let trees = subgame::flat_trees(trunk);
+    let mut inert = vec![false; trunk.info_sets.len()];
+    for sg in subgames {
+        for i in 0..sg.trunk_node.len() {
+            let (tree, _d, _w) = trees[sg.trunk_tree_idx[i] as usize];
+            if let game_tree::NodeView::Player { table_idx, .. } = tree.view(sg.trunk_node[i]) {
+                inert[table_idx as usize] = true;
+            }
+        }
+    }
+    inert
+}
+
+/// Stream the composed profile (trunk rows first, then each subgame's rows in
+/// subgame-index order) into `sink`. Subgame arenas are materialized ONE AT A
+/// TIME in rebuild mode, so peak RSS is trunk + accumulators + one arena — the
+/// whole point: no whole-profile map, no cloned [`SubgameRows`].
+#[allow(clippy::too_many_arguments)]
+fn stream_composed(
+    trunk: &PrebuiltTrees,
+    trunk_avg: &[ActionProbs],
+    subgames: &[SubgameState],
+    keep_arenas: bool,
+    best_rows: &SubgameRows,
+    sink: ArtifactSink<'_>,
+    mut meta: crate::storage::SolvedStateMeta,
+    ctx: ReplayCtx<'_>,
+) -> u64 {
+    let inert = inert_boundary_infosets(trunk, subgames);
+    let trunk_rows = inert.iter().filter(|&&b| !b).count() as u64;
+    let sub_rows: u64 = subgames.iter().map(|s| s.n_local as u64).sum();
+    let total_rows = trunk_rows + sub_rows;
+    // Duplicate-free by construction (inert trunk roots dropped), so the row
+    // count IS the distinct info-set count the meta header advertises.
+    meta.num_info_sets = total_rows as usize;
+
+    let mut sink = match sink {
+        ArtifactSink::File(path) => SinkImpl::File(
+            crate::storage::StrategyRowWriter::create(path, meta, total_rows)
+                .expect("create composed artifact"),
+        ),
+        ArtifactSink::Memory(m) => SinkImpl::Memory(m),
+    };
+
+    for (idx, (key, info, actions)) in trunk.info_sets.iter().enumerate() {
+        if inert[idx] {
+            continue;
+        }
+        sink.row(*key, info, actions, &trunk_avg[idx]);
+    }
+    for (si, sg) in subgames.iter().enumerate() {
+        let arena = sg.arena(keep_arenas, ctx);
+        for (local, (key, info, actions)) in arena.get().info_sets.iter().enumerate() {
+            sink.row(*key, info, actions, &best_rows[si][local]);
+        }
+    }
+    sink.finish();
+    total_rows
+}
+
 // ─── Checkpoint ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -618,9 +730,11 @@ fn nan_report(subgames: usize) -> DeepReport {
 }
 
 /// From-scratch deep CFR-D solve. `deals` / `dealer` / `rules` must be the
-/// inputs the caller intends (the trunk arena is built here). Returns the
-/// composed profile keyed by info-set key (subgame rows override the inert
-/// trunk boundary roots) plus the report.
+/// inputs the caller intends (the trunk arena is built here).
+///
+/// The composed profile (subgame rows override the inert trunk boundary roots)
+/// is written to `artifact` if one is given — streamed subgame by subgame, so
+/// nothing whole-profile is ever resident. `None` skips composition entirely.
 #[allow(clippy::too_many_arguments)]
 pub fn deep_solve(
     score: &Score,
@@ -631,7 +745,8 @@ pub fn deep_solve(
     match_values: &crate::match_value::MatchValueTable,
     cfg: DeepConfig,
     checkpoint: Option<&CheckpointCfg>,
-) -> (DeepReport, HashMap<u64, ActionProbs>) {
+    artifact: Option<ArtifactSink<'_>>,
+) -> DeepReport {
     let t0 = std::time::Instant::now();
     // Optional bounded worker pool (jobs==1 → run on the calling thread).
     let pool = if cfg.jobs > 1 {
@@ -878,7 +993,7 @@ pub fn deep_solve(
         t_round = std::time::Instant::now();
         if stop_here {
             // Chunked run: state is checkpointed; the final chunk does recovery.
-            return (nan_report(subgames.len()), HashMap::new());
+            return nan_report(subgames.len());
         }
     }
 
@@ -987,8 +1102,9 @@ pub fn deep_solve(
         )
     };
 
-    // Best certified profile.
-    let (best_rows, composed_eps) = {
+    // Best certified profile — BORROWED, never cloned (at 0×0 a clone is a
+    // second ~757 M-row copy of the whole subgame profile).
+    let (best_rows, composed_eps): (&SubgameRows, f64) = {
         let mut best: (&SubgameRows, f64) = (&raw_rows, raw_eps);
         if cfg.certify && cfg.certify_recoveries {
             if composed_eps_tail < best.1 {
@@ -998,14 +1114,14 @@ pub fn deep_solve(
                 best = (&br_rows, composed_eps_br);
             }
         }
-        (best.0.clone(), best.1)
+        best
     };
 
     // Decomposed game value of the certified profile.
     let inject_p0 = composed_boundary_p0(
         &subgames,
         cfg.keep_arenas,
-        &best_rows,
+        best_rows,
         n_trees,
         score,
         match_values,
@@ -1038,21 +1154,32 @@ pub fn deep_solve(
     let baseline_visits = 2 * n_full * cfg.baseline_iters;
     let multiplier = total_visits as f64 / baseline_visits.max(1) as f64;
 
-    // 5. Compose keyed profile (subgame rows override inert trunk boundary roots).
-    let mut composed: HashMap<u64, ActionProbs> =
-        HashMap::with_capacity(subgame_info_sets + n_trunk_info);
-    for (si, sg) in subgames.iter().enumerate() {
-        for (key, &local) in &sg.key_to_local {
-            composed.insert(key.0, best_rows[si][local as usize].clone());
-        }
-    }
-    for (idx, (key, _, _)) in trunk.info_sets.iter().enumerate() {
-        composed
-            .entry(key.0)
-            .or_insert_with(|| trunk_avg[idx].clone());
+    // 5. Compose the profile straight into the caller's sink (streamed).
+    if let Some(sink) = artifact {
+        let t_art = std::time::Instant::now();
+        let rows = stream_composed(
+            &trunk,
+            &trunk_avg,
+            &subgames,
+            cfg.keep_arenas,
+            best_rows,
+            sink,
+            crate::storage::SolvedStateMeta {
+                score: (score.zero, score.one),
+                turnup_class: tc,
+                iterations: (cfg.rounds as u64) * (cfg.trunk_iters + cfg.subgame_iters)
+                    + cfg.final_iters,
+                num_info_sets: 0,
+            },
+            ctx,
+        );
+        eprintln!(
+            "DEEP_PHASE artifact_s={:.1} rows={rows}",
+            t_art.elapsed().as_secs_f64()
+        );
     }
 
-    let report = DeepReport {
+    DeepReport {
         raw_eps,
         composed_eps_tail,
         composed_eps_br,
@@ -1070,8 +1197,7 @@ pub fn deep_solve(
         multiplier,
         trunk_info_sets: n_trunk_info,
         subgame_info_sets,
-    };
-    (report, composed)
+    }
 }
 
 /// Gadget re-solve every subgame from `cbv` (both players) starting from
@@ -1265,7 +1391,7 @@ mod tests {
         };
         let (_c, full) = crate::resolve::trunk_solve(&built, &score, tc, &mv, &subgames, tcfg);
 
-        let (deep, _composed) = deep_solve(
+        let deep = deep_solve(
             &score,
             tc,
             &deals,
@@ -1273,6 +1399,7 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 1, false),
+            None,
             None,
         );
 
@@ -1317,7 +1444,7 @@ mod tests {
     #[test]
     fn deep_jobs_parallel_matches_serial() {
         let (score, tc, deals, mv) = setup(24);
-        let (s1, _) = deep_solve(
+        let s1 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1326,8 +1453,9 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             None,
+            None,
         );
-        let (s4, _) = deep_solve(
+        let s4 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1335,6 +1463,7 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 4, false),
+            None,
             None,
         );
         assert!(
@@ -1352,7 +1481,7 @@ mod tests {
     #[test]
     fn deep_keep_arenas_matches_rebuild() {
         let (score, tc, deals, mv) = setup(24);
-        let (rebuild, _) = deep_solve(
+        let rebuild = deep_solve(
             &score,
             tc,
             &deals,
@@ -1361,8 +1490,9 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             None,
+            None,
         );
-        let (kept, _) = deep_solve(
+        let kept = deep_solve(
             &score,
             tc,
             &deals,
@@ -1370,6 +1500,7 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 1, true),
+            None,
             None,
         );
         assert!((rebuild.raw_eps - kept.raw_eps).abs() < 1e-12);
@@ -1385,7 +1516,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("deep.ckpt");
 
-        let (straight, _) = deep_solve(
+        let straight = deep_solve(
             &score,
             tc,
             &deals,
@@ -1393,6 +1524,7 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 1, false),
+            None,
             None,
         );
 
@@ -1403,7 +1535,7 @@ mod tests {
             resume: false,
             stop_after: Some(2),
         };
-        let (_p1, _) = deep_solve(
+        let _p1 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1412,6 +1544,7 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             Some(&ck1),
+            None,
         );
         // Chunk 2: resume, run rounds 2..4, checkpoint, stop.
         let ck2 = CheckpointCfg {
@@ -1420,7 +1553,7 @@ mod tests {
             resume: true,
             stop_after: Some(4),
         };
-        let (_p2, _) = deep_solve(
+        let _p2 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1429,6 +1562,7 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             Some(&ck2),
+            None,
         );
         // Chunk 3: resume, run rounds 4..6, full recovery + certificate.
         let ck3 = CheckpointCfg {
@@ -1437,7 +1571,7 @@ mod tests {
             resume: true,
             stop_after: None,
         };
-        let (resumed, _) = deep_solve(
+        let resumed = deep_solve(
             &score,
             tc,
             &deals,
@@ -1446,6 +1580,7 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             Some(&ck3),
+            None,
         );
 
         assert!(
@@ -1461,12 +1596,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Gate D: the decomposed streaming certificate equals the in-memory
-    /// whole-arena exploitability on the SAME composed profile (exact match).
+    /// Streamed artifact gate: `ArtifactSink::File` writes exactly the profile
+    /// `ArtifactSink::Memory` composes — same key set (duplicate-free: the inert
+    /// trunk boundary roots are dropped in favour of the subgames' trained rows)
+    /// and bit-identical f32 rows through the storage loader.
     #[test]
-    fn deep_streaming_cert_matches_full_arena() {
+    fn deep_streamed_artifact_matches_in_memory_profile() {
         let (score, tc, deals, mv) = setup(24);
-        let (deep, composed) = deep_solve(
+        let mut composed: HashMap<u64, ActionProbs> = HashMap::new();
+        deep_solve(
             &score,
             tc,
             &deals,
@@ -1475,6 +1613,64 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             None,
+            Some(ArtifactSink::Memory(&mut composed)),
+        );
+
+        let dir = std::env::temp_dir().join(format!("deep_artifact_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("composed.bin");
+        deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(6, 1, false),
+            None,
+            Some(ArtifactSink::File(&path)),
+        );
+
+        let mut seen = 0usize;
+        let mut keys: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let meta = crate::storage::stream_strategy_rows(&path, |row| {
+            let key = row.info_set.key();
+            let want = composed
+                .get(&key.0)
+                .unwrap_or_else(|| panic!("streamed key {} absent from the memory sink", key.0));
+            // `save_strategy_rows`/`StrategyRowWriter` normalize by the row sum
+            // before the f32 cast; reproduce that exactly.
+            let total: f64 = want.iter().sum();
+            let expect: Vec<f32> = want.iter().map(|&p| (p / total) as f32).collect();
+            assert_eq!(row.average_strategy, expect, "row {} differs", key.0);
+            assert_eq!(row.actions.len(), want.len());
+            assert!(keys.insert(key.0), "duplicate row for key {}", key.0);
+            seen += 1;
+        })
+        .expect("read streamed artifact");
+
+        assert_eq!(seen, composed.len(), "streamed row count vs in-memory rows");
+        assert_eq!(meta.num_info_sets, seen);
+        assert_eq!(meta.score, (score.zero, score.one));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gate D: the decomposed streaming certificate equals the in-memory
+    /// whole-arena exploitability on the SAME composed profile (exact match).
+    #[test]
+    fn deep_streaming_cert_matches_full_arena() {
+        let (score, tc, deals, mv) = setup(24);
+        let mut composed: HashMap<u64, ActionProbs> = HashMap::new();
+        let deep = deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(6, 1, false),
+            None,
+            Some(ArtifactSink::Memory(&mut composed)),
         );
 
         // Materialize the composed profile against a full arena, aligned to its
