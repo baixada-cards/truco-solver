@@ -1926,15 +1926,19 @@ pub fn build_trunk_arena(
 /// weight)` (all sharing the subgame's `dealer`), all sharing a single local
 /// `InfoSetRegistry`. The local registry IS the subgame's compact accumulator
 /// index; `flat_trees`/`flat_trees_dw` yield the members in `states` order with
-/// `tree_idx == member index`. Returns the local `PrebuiltTrees` and the
-/// `InfoSetKey -> local table_idx` map the streaming certificate resolves rows
-/// through. Info sets are shared across members (the subgame's private hands
-/// ranging over consistent deals), exactly as the full arena would share them.
+/// `tree_idx == member index`. Info sets are shared across members (the
+/// subgame's private hands ranging over consistent deals), exactly as the full
+/// arena would share them.
+///
+/// No `InfoSetKey -> local table_idx` map is returned: every consumer keys off
+/// the packed nodes' `table_idx`, and `info_sets` is already in that order, so
+/// building the map cost one transient hash entry per local info set per build
+/// (up to ~2.5 M for the largest 0×0 subgame, every round in rebuild mode) for
+/// nothing.
 pub fn build_subgame_local(
     states: &[(TraversalState, f64)],
     dealer: Player,
-) -> Result<(PrebuiltTrees, std::collections::HashMap<InfoSetKey, u32>), truco_engine::EngineError>
-{
+) -> Result<PrebuiltTrees, truco_engine::EngineError> {
     let mut registry = InfoSetRegistry::default();
     let mut nodes_arena = ArenaBuilder::default();
     let mut edges_arena = ArenaBuilder::default();
@@ -1962,22 +1966,13 @@ pub fn build_subgame_local(
     let nodes_buf = nodes_arena.finish();
     let edges_buf = edges_arena.finish();
     let entries = assemble_entries(&nodes_buf, &edges_buf, 0, 0, &spans, &weights);
-    let key_to_idx: std::collections::HashMap<InfoSetKey, u32> = registry
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(i, (k, _, _))| (*k, i as u32))
-        .collect();
-    Ok((
-        PrebuiltTrees {
-            entries,
-            info_sets: registry.entries,
-            nodes_buf,
-            edges_buf,
-            spans,
-        },
-        key_to_idx,
-    ))
+    Ok(PrebuiltTrees {
+        entries,
+        info_sets: registry.entries,
+        nodes_buf,
+        edges_buf,
+        spans,
+    })
 }
 
 /// Construct per-deal `GameTree` handles over shared arenas. `nodes_base` /

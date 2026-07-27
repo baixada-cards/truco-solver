@@ -145,11 +145,11 @@ struct SubgameState {
     /// Compact replay seeds `(deal_idx, action path, deal_weight)` — member
     /// order; rebuild the local arena via [`ReplayCtx::materialize`].
     seeds: Vec<(u32, Box<[u8]>, f64)>,
-    /// Local info-set count (stable across rebuilds). The key→local-index map
-    /// `build_subgame_local` also returns is deliberately NOT retained: the only
-    /// consumer was whole-profile composition, which now streams straight out of
-    /// the local arena's `info_sets` (already in local-index order). At 0×0
-    /// those maps summed to ~757 M entries ≈ 30 GB of pure duplicate index.
+    /// Local info-set count (stable across rebuilds). No key→local-index map is
+    /// retained: the only consumer was whole-profile composition, which now
+    /// streams straight out of the local arena's `info_sets` (already in
+    /// local-index order). At 0×0 those maps summed to ~757 M entries ≈ 30 GB
+    /// of pure duplicate index; `build_subgame_local` no longer builds one.
     n_local: usize,
     /// Local node count of each member subtree (for [`ResolveMember`] spans).
     member_nodes: Vec<usize>,
@@ -229,16 +229,14 @@ fn build_or_load_arena(
             }
         }
         let states = ctx.materialize(seeds, dealer);
-        let (pb, _) = game_tree::build_subgame_local(&states, dealer).expect("subgame build");
+        let pb = game_tree::build_subgame_local(&states, dealer).expect("subgame build");
         if let Err(e) = crate::treepack::save_pack(&path, &pb, pack_sig) {
             eprintln!("DEEP_WARN arena_cache_write si={si} err={e}");
         }
         return pb;
     }
     let states = ctx.materialize(seeds, dealer);
-    game_tree::build_subgame_local(&states, dealer)
-        .expect("subgame build")
-        .0
+    game_tree::build_subgame_local(&states, dealer).expect("subgame build")
 }
 
 impl SubgameState {
@@ -322,8 +320,7 @@ fn init_subgame(
         .collect();
     let pack_sig = subgame_pack_sig(ctx, dealer, &seeds);
     let states = ctx.materialize(&seeds, dealer);
-    let (arena, _key_to_local) =
-        game_tree::build_subgame_local(&states, dealer).expect("subgame build");
+    let arena = game_tree::build_subgame_local(&states, dealer).expect("subgame build");
     if let ArenaMode::Cache(dir) = arenas {
         let path = pack_path(dir, si);
         if !path.exists() {
