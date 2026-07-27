@@ -167,6 +167,11 @@ fn main() {
             eprintln!(
                 "       [--checkpoint PATH --checkpoint-every N] [--resume]]  # Phase-5 deep cell"
             );
+            eprintln!("       [--arena-cache DIR|off]  # per-subgame arena packs on disk;");
+            eprintln!("         default ON at <checkpoint>.arenas when --checkpoint is set,");
+            eprintln!("         OFF otherwise. First build of each subgame arena is packed,");
+            eprintln!("         later rounds mmap it instead of replaying the engine");
+            eprintln!("         (bit-identical sweeps). --keep-arenas (all in RAM) wins.");
             eprintln!(
                 "      From-scratch CFR-D (plan 84 Phase 4): alternate trunk sweeps (round-2"
             );
@@ -1055,6 +1060,17 @@ fn run_trunk_solve(args: &[String]) {
     let checkpoint_path = parse_opt_str_flag(args, "--checkpoint");
     let checkpoint_every = parse_usize_flag(args, "--checkpoint-every", 0);
     let resume = has_flag(args, "--resume");
+    // Per-subgame arena disk cache. Default: ON at `<checkpoint>.arenas` when a
+    // checkpoint is configured (the production shape — rebuilding 3.77 B nodes
+    // of arena every round is the dominant per-round cost at 0x0); OFF when
+    // there is no checkpoint, so a throwaway local run never silently fills a
+    // temp directory. `--arena-cache off` disables it, `--arena-cache DIR`
+    // overrides the location.
+    let arena_cache = match parse_opt_str_flag(args, "--arena-cache").as_deref() {
+        Some("off") | Some("none") => None,
+        Some(dir) => Some(dir.to_string()),
+        None => checkpoint_path.as_ref().map(|p| format!("{p}.arenas")),
+    };
 
     // 1. Enumerate deals (strided subsample, exactly like run_solve_tc).
     let mut deals = enumerate_deals(&tc);
@@ -1085,6 +1101,7 @@ fn run_trunk_solve(args: &[String]) {
             checkpoint_path,
             checkpoint_every,
             resume,
+            arena_cache,
             composed_out,
         );
         return;
@@ -1250,6 +1267,7 @@ fn run_deep_solve(
     checkpoint_path: Option<String>,
     checkpoint_every: usize,
     resume: bool,
+    arena_cache: Option<String>,
     composed_out: Option<String>,
 ) {
     println!(
@@ -1270,6 +1288,17 @@ fn run_deep_solve(
         certify,
         rules,
         match_values_path,
+    );
+    println!(
+        "DEEP_ARENAS mode={}",
+        if keep_arenas {
+            "keep (all arenas resident in RAM)".to_string()
+        } else {
+            match arena_cache.as_deref() {
+                Some(dir) => format!("cache dir={dir}"),
+                None => "rebuild (no cache)".to_string(),
+            }
+        }
     );
 
     let mv = load_match_values(Path::new(match_values_path)).expect("load --match-values");
@@ -1322,6 +1351,7 @@ fn run_deep_solve(
         &mv,
         cfg,
         checkpoint.as_ref(),
+        arena_cache.as_deref().map(std::path::Path::new),
         artifact_path
             .as_deref()
             .map(truco_solver::deep::ArtifactSink::File),
