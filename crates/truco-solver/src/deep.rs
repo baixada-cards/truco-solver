@@ -54,6 +54,12 @@ pub struct DeepConfig {
     pub baseline_iters: u64,
     /// Subgame-parallel worker count (trunk sweep stays single-threaded).
     pub jobs: usize,
+    /// Worker count for the CERTIFICATE only (the decomposed best response).
+    /// Separate from `jobs` because a BR worker holds a whole subgame arena
+    /// plus its BR value tables at once: at 0×0 `jobs=16` peaked at 124.5 GiB
+    /// of a 128 GiB box (2026-07-23), leaving no headroom. Default
+    /// `min(jobs, 8)`.
+    pub cert_jobs: usize,
     /// Keep each subgame's local arena alive across rounds (else rebuild it from
     /// the captured boundary state every round — the default, lower peak RSS).
     pub keep_arenas: bool,
@@ -1197,6 +1203,25 @@ pub fn deep_solve(
         }
     }
 
+    // Certificate pool: bounded independently of the round pool (see
+    // `DeepConfig::cert_jobs`). Reuse the round pool when the counts agree so
+    // the common case does not allocate a second thread set.
+    let cert_pool_owned = if cfg.cert_jobs > 1 && cfg.cert_jobs != cfg.jobs {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(cfg.cert_jobs)
+                .build()
+                .expect("rayon cert pool"),
+        )
+    } else {
+        None
+    };
+    let cert_pool: Option<&rayon::ThreadPool> = if cfg.cert_jobs > 1 {
+        cert_pool_owned.as_ref().or(pool.as_ref())
+    } else {
+        None
+    };
+
     let compute_eps = |sg_rows: &SubgameRows| -> f64 {
         if !cfg.certify {
             return f64::NAN;
@@ -1212,7 +1237,7 @@ pub fn deep_solve(
             score,
             match_values,
             ctx,
-            pool.as_ref(),
+            cert_pool,
         )
     };
 
@@ -1536,6 +1561,7 @@ mod tests {
             final_iters: 80,
             baseline_iters: 90,
             jobs,
+            cert_jobs: jobs,
             keep_arenas: keep,
             certify: true,
             certify_recoveries: true,

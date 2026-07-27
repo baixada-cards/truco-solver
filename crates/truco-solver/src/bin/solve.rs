@@ -163,7 +163,11 @@ fn main() {
             eprintln!("      [--max-deals N] [--rounds N (30)] [--trunk-sweeps T (3)]");
             eprintln!("      [--subgame-iters R (3)] [--final-iters K (120)]");
             eprintln!("      [--baseline-iters 90] [--legacy-tree] [--composed-out PATH]");
-            eprintln!("      [--deep [--jobs N (1)] [--keep-arenas] [--certify full|raw|skip]");
+            eprintln!("      [--deep [--jobs N (1)] [--cert-jobs N (min(jobs,8))]");
+            eprintln!("       # --cert-jobs sizes the CERTIFICATE pool only: each BR worker");
+            eprintln!("       # holds a whole subgame arena, so it is the memory-critical");
+            eprintln!("       # knob (0x0 at --jobs 16 peaked at 124.5 GiB of 128 GiB).");
+            eprintln!("       [--keep-arenas] [--certify full|raw|skip]");
             eprintln!(
                 "       [--checkpoint PATH --checkpoint-every N] [--resume]]  # Phase-5 deep cell"
             );
@@ -1056,6 +1060,10 @@ fn run_trunk_solve(args: &[String]) {
     // registries + streaming certificate, for cells too big for one arena.
     let deep = has_flag(args, "--deep");
     let jobs = parse_usize_flag(args, "--jobs", 1);
+    // Certificate pool size. Bounded BELOW --jobs by default: every BR worker
+    // holds a whole subgame arena and its value tables at once, and at 0x0
+    // --jobs 16 put the certificate at 124.5 GiB of a 128 GiB box (2026-07-23).
+    let cert_jobs = parse_usize_flag(args, "--cert-jobs", jobs.min(8));
     let keep_arenas = has_flag(args, "--keep-arenas");
     let certify_mode = parse_opt_str_flag(args, "--certify").unwrap_or_else(|| "full".into());
     let certify = certify_mode != "skip";
@@ -1098,6 +1106,7 @@ fn run_trunk_solve(args: &[String]) {
             final_iters,
             baseline_iters,
             jobs,
+            cert_jobs,
             keep_arenas,
             certify,
             certify_recoveries,
@@ -1264,6 +1273,7 @@ fn run_deep_solve(
     final_iters: u64,
     baseline_iters: u64,
     jobs: usize,
+    cert_jobs: usize,
     keep_arenas: bool,
     certify: bool,
     certify_recoveries: bool,
@@ -1292,6 +1302,7 @@ fn run_deep_solve(
         rules,
         match_values_path,
     );
+    println!("DEEP_CERT_JOBS cert_jobs={cert_jobs}");
     println!(
         "DEEP_ARENAS mode={}",
         if keep_arenas {
@@ -1328,6 +1339,7 @@ fn run_deep_solve(
         final_iters,
         baseline_iters,
         jobs,
+        cert_jobs,
         keep_arenas,
         certify,
         certify_recoveries,
