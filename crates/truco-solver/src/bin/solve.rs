@@ -163,10 +163,22 @@ fn main() {
             eprintln!("      [--max-deals N] [--rounds N (30)] [--trunk-sweeps T (3)]");
             eprintln!("      [--subgame-iters R (3)] [--final-iters K (120)]");
             eprintln!("      [--baseline-iters 90] [--legacy-tree] [--composed-out PATH]");
-            eprintln!("      [--deep [--jobs N (1)] [--keep-arenas] [--certify full|raw|skip]");
+            eprintln!("      [--deep [--jobs N (1)] [--cert-jobs N (min(jobs,8))]");
+            eprintln!("       # --cert-jobs sizes the CERTIFICATE pool only: each BR worker");
+            eprintln!("       # holds a whole subgame arena, so it is the memory-critical");
+            eprintln!("       # knob (0x0 at --jobs 16 peaked at 124.5 GiB of 128 GiB).");
+            eprintln!("       [--keep-arenas] [--certify full|raw|skip]");
             eprintln!(
                 "       [--checkpoint PATH --checkpoint-every N] [--resume]]  # Phase-5 deep cell"
             );
+            eprintln!("       # --resume may RAISE --rounds (never lower it below the");
+            eprintln!("       # rounds already complete): extending a checkpoint is");
+            eprintln!("       # bit-identical to having asked for the longer run up front.");
+            eprintln!("       [--arena-cache DIR|off]  # per-subgame arena packs on disk;");
+            eprintln!("         default ON at <checkpoint>.arenas when --checkpoint is set,");
+            eprintln!("         OFF otherwise. First build of each subgame arena is packed,");
+            eprintln!("         later rounds mmap it instead of replaying the engine");
+            eprintln!("         (bit-identical sweeps). --keep-arenas (all in RAM) wins.");
             eprintln!(
                 "      From-scratch CFR-D (plan 84 Phase 4): alternate trunk sweeps (round-2"
             );
@@ -1048,6 +1060,10 @@ fn run_trunk_solve(args: &[String]) {
     // registries + streaming certificate, for cells too big for one arena.
     let deep = has_flag(args, "--deep");
     let jobs = parse_usize_flag(args, "--jobs", 1);
+    // Certificate pool size. Bounded BELOW --jobs by default: every BR worker
+    // holds a whole subgame arena and its value tables at once, and at 0x0
+    // --jobs 16 put the certificate at 124.5 GiB of a 128 GiB box (2026-07-23).
+    let cert_jobs = parse_usize_flag(args, "--cert-jobs", jobs.min(8));
     let keep_arenas = has_flag(args, "--keep-arenas");
     let certify_mode = parse_opt_str_flag(args, "--certify").unwrap_or_else(|| "full".into());
     let certify = certify_mode != "skip";
@@ -1055,6 +1071,17 @@ fn run_trunk_solve(args: &[String]) {
     let checkpoint_path = parse_opt_str_flag(args, "--checkpoint");
     let checkpoint_every = parse_usize_flag(args, "--checkpoint-every", 0);
     let resume = has_flag(args, "--resume");
+    // Per-subgame arena disk cache. Default: ON at `<checkpoint>.arenas` when a
+    // checkpoint is configured (the production shape — rebuilding 3.77 B nodes
+    // of arena every round is the dominant per-round cost at 0x0); OFF when
+    // there is no checkpoint, so a throwaway local run never silently fills a
+    // temp directory. `--arena-cache off` disables it, `--arena-cache DIR`
+    // overrides the location.
+    let arena_cache = match parse_opt_str_flag(args, "--arena-cache").as_deref() {
+        Some("off") | Some("none") => None,
+        Some(dir) => Some(dir.to_string()),
+        None => checkpoint_path.as_ref().map(|p| format!("{p}.arenas")),
+    };
 
     // 1. Enumerate deals (strided subsample, exactly like run_solve_tc).
     let mut deals = enumerate_deals(&tc);
@@ -1079,12 +1106,14 @@ fn run_trunk_solve(args: &[String]) {
             final_iters,
             baseline_iters,
             jobs,
+            cert_jobs,
             keep_arenas,
             certify,
             certify_recoveries,
             checkpoint_path,
             checkpoint_every,
             resume,
+            arena_cache,
             composed_out,
         );
         return;
@@ -1244,12 +1273,14 @@ fn run_deep_solve(
     final_iters: u64,
     baseline_iters: u64,
     jobs: usize,
+    cert_jobs: usize,
     keep_arenas: bool,
     certify: bool,
     certify_recoveries: bool,
     checkpoint_path: Option<String>,
     checkpoint_every: usize,
     resume: bool,
+    arena_cache: Option<String>,
     composed_out: Option<String>,
 ) {
     println!(
@@ -1270,6 +1301,18 @@ fn run_deep_solve(
         certify,
         rules,
         match_values_path,
+    );
+    println!("DEEP_CERT_JOBS cert_jobs={cert_jobs}");
+    println!(
+        "DEEP_ARENAS mode={}",
+        if keep_arenas {
+            "keep (all arenas resident in RAM)".to_string()
+        } else {
+            match arena_cache.as_deref() {
+                Some(dir) => format!("cache dir={dir}"),
+                None => "rebuild (no cache)".to_string(),
+            }
+        }
     );
 
     let mv = load_match_values(Path::new(match_values_path)).expect("load --match-values");
@@ -1296,6 +1339,7 @@ fn run_deep_solve(
         final_iters,
         baseline_iters,
         jobs,
+        cert_jobs,
         keep_arenas,
         certify,
         certify_recoveries,
@@ -1308,7 +1352,12 @@ fn run_deep_solve(
     });
 
     let t_solve = Instant::now();
-    let (report, composed) = truco_solver::deep::deep_solve(
+    // The composed artifact streams straight to `--composed-out` INSIDE the
+    // solve: the old path returned a whole-profile HashMap (~757 M rows at 0×0)
+    // and then rebuilt the full arena to enumerate keys — the two things the
+    // deep path exists to avoid, and the 2026-07-23 post-certificate OOM.
+    let artifact_path = composed_out.as_ref().map(std::path::PathBuf::from);
+    let report = truco_solver::deep::deep_solve(
         score,
         tc,
         deals,
@@ -1317,6 +1366,10 @@ fn run_deep_solve(
         &mv,
         cfg,
         checkpoint.as_ref(),
+        arena_cache.as_deref().map(std::path::Path::new),
+        artifact_path
+            .as_deref()
+            .map(truco_solver::deep::ArtifactSink::File),
     );
     let solve_s = t_solve.elapsed().as_secs_f64();
 
@@ -1350,37 +1403,7 @@ fn run_deep_solve(
     );
 
     if let Some(out) = composed_out {
-        // Stream the composed keyed rows straight to the artifact (subgame rows
-        // already override the inert trunk boundary roots inside `deep_solve`).
-        let built = truco_solver::game_tree::build_all_trees_with_dealer_rules(
-            score,
-            tc,
-            deals,
-            Some(dealer),
-            rules,
-        )
-        .expect("build trees for --composed-out");
-        let meta = SolvedStateMeta {
-            score: (score.zero, score.one),
-            turnup_class: tc,
-            iterations: (rounds as u64) * (trunk_iters + subgame_iters) + final_iters,
-            num_info_sets: built.info_sets.len(),
-        };
-        let rows = built.info_sets.iter().map(|(key, info, actions)| {
-            let probs = composed
-                .get(&key.0)
-                .cloned()
-                .unwrap_or_else(|| truco_solver::strategy::uniform_probs(actions.len()));
-            (key.0, info, actions.clone(), probs)
-        });
-        // Materialize to owned then borrow for save_strategy_rows.
-        let owned: Vec<_> = rows.collect();
-        let borrowed = owned
-            .iter()
-            .map(|(k, info, actions, probs)| (*k, *info, &actions[..], &probs[..]));
-        truco_solver::storage::save_strategy_rows(Path::new(&out), meta, borrowed)
-            .expect("write --composed-out");
-        println!("DEEP_COMPOSED_OUT path={} rows={}", out, owned.len());
+        println!("DEEP_COMPOSED_OUT path={out}");
     }
 
     println!("DEEP_DONE solve_s={:.3}", solve_s);
