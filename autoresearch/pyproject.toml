@@ -5,7 +5,7 @@ description = "Automated CFR algorithm research for Truco solver"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.117.0",
-    "openai>=2.45.0",
+    "openai>=2.46.0",
     # Tracking client only (no server/UI); enough to log params/metrics/artifacts
     # to a local file store or a remote tracking server.
     "mlflow-skinny>=2.20",
