@@ -2197,6 +2197,46 @@ ever going to move by construction.
     retained, teacher-grade 2.5e-4 (~0.0125 pp) bought later by resuming
     — iterations compose additively, so deferring depth costs nothing.
 
+36. **The Phase-5 tail: four deferred optimizations, and one instruction
+    worth disobeying (2026-07-27, $0 local).** The 2026-07-23 probe left a
+    known post-certificate OOM and three "engineering, not science" items.
+    All four are now built and gated (`SOLVER_BENCHMARKS.md` 2026-07-27),
+    and two of them turned out to be more interesting than their tickets.
+    (a) The streamed composed artifact: the old return type was
+    `(DeepReport, HashMap<u64, ActionProbs>)` and the CLI then rebuilt the
+    FULL arena just to enumerate keys — the two things the deep path exists
+    to avoid, hiding in the artifact tail. Streaming per subgame cut peak
+    RSS 4.35× at 8×8/2,000 deals with byte-for-byte the same file size and
+    max TV 0.000000 over 3.87 M rows. It also killed
+    `SubgameState::key_to_local` outright (~30 GB at 0×0): the map's ONLY
+    consumer was composition, and the sweeps key off the local `table_idx`.
+    The scheduled "compact it into a sorted Vec" became "delete it", which
+    is the better version of that ticket. (b) The arena cache: packing each
+    subgame arena on first build and mmapping it afterwards buys 3.3–3.7×
+    wall per round for 0.4–7% peak RSS, where `--keep-arenas` buys ~1.5×
+    more for 2.0–2.3× RSS. That ratio is the whole argument — at 0×0 the
+    RSS column is the binding constraint, not the wall column. Honest
+    caveat: only the node/edge arenas become page cache; the info-set
+    registry is still decoded per use because the sweep reads
+    `info_sets[table_idx].1.player`. Making THAT mappable is the next
+    bounded win, unbuilt. (c) Resume-extend was specced with an explicit
+    instruction to keep the checkpoint's saved warm-up anchor, on the
+    correct reasoning that re-anchoring would double-count pre-warmup CBV
+    mass. Implemented as specced, a 3→6 extension certified 0.067 against
+    0.0132 for a straight 6-round run: the extension was averaging from the
+    original, far less converged midpoint — the 2026-07-21 lagging-average
+    error wearing a different hat. Clearing the CBV maps AT the anchor
+    removes the double-count the instruction feared, and then re-anchoring
+    makes an extension bit-identical to having asked for the longer run up
+    front (verified from both 2-round and 3-round checkpoints, exact f64
+    equality). The lesson is not "ignore the spec" — the spec's hazard was
+    real — it is that the hazard had a fix, and accepting a stale anchor to
+    avoid it was paying with the thing the whole project measures.
+    "ε=0.01 now, 2.5e-4 later at zero waste" is now literally true.
+    (d) `--cert-jobs`, default `min(jobs, 8)`: the certificate is the
+    memory-critical phase (each BR worker holds a whole subgame arena;
+    0×0 at jobs=16 peaked at 124.5 GiB of 128), so it gets its own bound.
+
 ---
 
 ## Technical choices worth documenting

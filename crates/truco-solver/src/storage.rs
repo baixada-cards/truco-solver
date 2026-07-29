@@ -224,6 +224,101 @@ pub fn save_strategy_rows<'a, F: AccumElem + 'a>(
     Ok(())
 }
 
+/// Incremental writer for the same on-disk layout [`save_strategy_rows`]
+/// produces, for callers that know the row count up front but CANNOT hold the
+/// rows: the deep path's composed profile is ~757 M rows at 0×0 (the
+/// 2026-07-23 post-certificate OOM), and it is assembled subgame by subgame.
+///
+/// Rows are written in call order — NOT key-sorted like `save_strategy_rows` —
+/// so the bytes differ from a materialized write even though every row and the
+/// meta header are identical. Readers (`load_strategy`, `stream_strategy_rows`,
+/// `load_compact_average_policy`) are order-independent; where two rows share a
+/// key the LAST one wins, matching the deep composition's "subgame rows
+/// override the inert trunk boundary roots".
+pub struct StrategyRowWriter {
+    writer: std::io::BufWriter<fs::File>,
+    tmp_path: std::path::PathBuf,
+    path: std::path::PathBuf,
+    expected_rows: u64,
+    written_rows: u64,
+}
+
+impl StrategyRowWriter {
+    /// Open `path` for streaming; `expected_rows` is written into the header and
+    /// enforced by [`StrategyRowWriter::finish`].
+    pub fn create(
+        path: &Path,
+        meta: SolvedStateMeta,
+        expected_rows: u64,
+    ) -> Result<Self, StorageError> {
+        ensure_parent_dir(path)?;
+        let tmp_path = atomic_tmp_path(path);
+        let file = fs::File::create(&tmp_path).map_err(|e| StorageError::Io(e.to_string()))?;
+        let mut writer = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
+        bincode::serialize_into(&mut writer, &meta)
+            .map_err(|e| StorageError::Serialize(e.to_string()))?;
+        bincode::serialize_into(&mut writer, &expected_rows)
+            .map_err(|e| StorageError::Serialize(e.to_string()))?;
+        Ok(Self {
+            writer,
+            tmp_path,
+            path: path.to_path_buf(),
+            expected_rows,
+            written_rows: 0,
+        })
+    }
+
+    /// Append one row. `weights` is normalized exactly like
+    /// [`save_strategy_rows`] (uniform when the sum is zero), so an already
+    /// normalized probability row round-trips through the same arithmetic a
+    /// materialized write would have applied.
+    pub fn write_row<F: AccumElem>(
+        &mut self,
+        key: u64,
+        info_set: &InfoSet,
+        actions: &[AbstractAction],
+        weights: &[F],
+    ) -> Result<(), StorageError> {
+        let total: f64 = weights.iter().map(|s| s.to_f64()).sum();
+        let average_strategy: Vec<f32> = if total > 0.0 {
+            weights
+                .iter()
+                .map(|&s| (s.to_f64() / total) as f32)
+                .collect()
+        } else {
+            vec![(1.0f64 / actions.len() as f64) as f32; actions.len()]
+        };
+        let entry = StrategyEntryRef {
+            key,
+            info_set,
+            actions,
+            average_strategy,
+        };
+        bincode::serialize_into(&mut self.writer, &entry)
+            .map_err(|e| StorageError::Serialize(e.to_string()))?;
+        self.written_rows += 1;
+        Ok(())
+    }
+
+    /// Flush and atomically rename into place. Errors (leaving the temp file
+    /// behind, never the destination) if the row count missed the header.
+    pub fn finish(mut self) -> Result<(), StorageError> {
+        if self.written_rows != self.expected_rows {
+            return Err(StorageError::Serialize(format!(
+                "strategy row count mismatch: header {} rows, wrote {}",
+                self.expected_rows, self.written_rows
+            )));
+        }
+        use std::io::Write as _;
+        self.writer
+            .flush()
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+        drop(self.writer);
+        fs::rename(&self.tmp_path, &self.path).map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(())
+    }
+}
+
 /// Legacy strategy-file layout: entries carry a [`LegacyInfoSet`].
 #[derive(Deserialize)]
 struct LegacySerializedStrategyTable {
