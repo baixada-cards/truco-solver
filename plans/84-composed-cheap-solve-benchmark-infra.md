@@ -198,7 +198,39 @@ arena builds to hit the ≤64 GB target:
       artifact OOM → open, fix pattern known). ε=0.01 extrapolation:
       $9–45/cell·tc·dealer at current code, $2–5 with arena caching +
       R>1 (unbuilt). `SOLVER_BENCHMARKS.md` 2026-07-23.
-- [ ] Phase 5 (tail, deferred): $0.50 post-fix round-cost pin; streamed
-      artifact write (fixes the post-cert OOM); arena NVMe cache + R>1
-      amortization; then the r150 certified cell if/when funded — resumes
-      the retained checkpoint at zero waste.
+- [x] Phase 5 (tail, ENGINEERING) — COMPLETE 2026-07-27, $0, local
+      (`SOLVER_BENCHMARKS.md` 2026-07-27):
+      - [x] Streamed composed artifact — fixes the post-certificate OOM.
+            `deep_solve` takes an artifact sink and streams rows subgame by
+            subgame; no whole-profile map, no cloned rows, no full-arena
+            rebuild. Measured 4.35× lower peak RSS at 8×8/2,000 deals, output
+            content-identical (max TV 0.000000 over 3.87 M rows).
+      - [x] Arena disk cache (`--arena-cache DIR`, default ON at
+            `<checkpoint>.arenas`) — 3.3–3.7× wall per round at jobs=1 for
+            0.4–7% peak RSS, against 2.0–2.3× RSS for `--keep-arenas`.
+            Bit-identical certificates.
+      - [x] Resume-EXTEND — `--rounds` may grow on resume; extending a
+            checkpoint is bit-identical to having asked for the longer run up
+            front. This is the mechanism the "ε=0.01 now, 2.5e-4 later"
+            strategy assumed but did not have.
+      - [x] `--cert-jobs` (default `min(jobs, 8)`) — bounds the memory-critical
+            certificate pool separately from the round pool.
+      - [x] Key-map compaction: `SubgameState::key_to_local` (~757 M entries
+            ≈ 30 GB at 0×0) DELETED rather than compacted — streaming
+            composition was its only consumer, and the sweeps key off the
+            local `table_idx`, not the map.
+- [ ] Phase 5 (tail, PRODUCTION SCALE) — **awaiting funding**; nothing below
+      is blocked by code any more:
+      - [x] Round-cost pin DONE 2026-07-27 ($0.82, run
+            `deep-pin-0x0-r6-20260727`): rounds 4–6 off the arena cache at
+            6.5–9.5 min (~8× the pre-fix 75 min); resume-extend's first
+            production use worked (`warmup_reanchored 1→3`). 0×0 r150 job
+            ≈ 26 box-hours ≈ $6.3 spot; warm whole-grid ≈ 3,000–4,200
+            box-hours. Peak RSS 85.6 GiB (96–128 GB boxes remain the spec).
+            `SOLVER_BENCHMARKS.md` 2026-07-27. Round-6 checkpoint retained
+            in GCS alongside the round-3 one.
+      - [ ] The r150 certified 0×0 cell (ε≈0.01), and the r1500 extension to
+            ε≈2.5e-4 on top of it — the extension is now genuinely
+            incremental (resume-extend), so the two can be bought separately.
+      - [ ] R>1 amortization sweep (`--subgame-iters` > 1) — untouched by this
+            tail; still an open cost lever.

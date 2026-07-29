@@ -12,8 +12,10 @@
 //!    ([`crate::game_tree::build_subgame_local`]); that local registry is the
 //!    subgame's compact accumulator index. Per-subgame [`cfr::DenseAccum`]s stay
 //!    alive across rounds (their sum ≈ one full accumulator; ~20 GB at 0×0 with
-//!    `accum-f32`). The arenas are rebuilt per round by default (`keep_arenas`
-//!    off) or kept if memory allows.
+//!    `accum-f32`). Each round's arena comes from one of three sources
+//!    ([`ArenaMode`]): rebuilt from replay seeds, mapped from the per-subgame
+//!    arena cache (`--arena-cache DIR`, the default when checkpointing), or
+//!    kept in RAM (`--keep-arenas`). All three produce identical sweeps.
 //! 3. Certifies by a decomposed, streaming best response: each subgame is
 //!    best-responded independently (its conditional boundary value injected into
 //!    the trunk BR), so the whole-game exploitability is assembled without ever
@@ -52,6 +54,12 @@ pub struct DeepConfig {
     pub baseline_iters: u64,
     /// Subgame-parallel worker count (trunk sweep stays single-threaded).
     pub jobs: usize,
+    /// Worker count for the CERTIFICATE only (the decomposed best response).
+    /// Separate from `jobs` because a BR worker holds a whole subgame arena
+    /// plus its BR value tables at once: at 0×0 `jobs=16` peaked at 124.5 GiB
+    /// of a 128 GiB box (2026-07-23), leaving no headroom. Default
+    /// `min(jobs, 8)`.
+    pub cert_jobs: usize,
     /// Keep each subgame's local arena alive across rounds (else rebuild it from
     /// the captured boundary state every round — the default, lower peak RSS).
     pub keep_arenas: bool,
@@ -137,17 +145,44 @@ struct SubgameState {
     /// Compact replay seeds `(deal_idx, action path, deal_weight)` — member
     /// order; rebuild the local arena via [`ReplayCtx::materialize`].
     seeds: Vec<(u32, Box<[u8]>, f64)>,
-    /// Local info-set count and key→local-index map (stable across rebuilds).
+    /// Local info-set count (stable across rebuilds). No key→local-index map is
+    /// retained: the only consumer was whole-profile composition, which now
+    /// streams straight out of the local arena's `info_sets` (already in
+    /// local-index order). At 0×0 those maps summed to ~757 M entries ≈ 30 GB
+    /// of pure duplicate index; `build_subgame_local` no longer builds one.
     n_local: usize,
-    key_to_local: HashMap<InfoSetKey, u32>,
     /// Local node count of each member subtree (for [`ResolveMember`] spans).
     member_nodes: Vec<usize>,
     /// Warm accumulator across rounds.
     dense: cfr::DenseAccum,
     /// Cached local arena when `keep_arenas`.
     arena: Option<PrebuiltTrees>,
+    /// Identity of this subgame's on-disk arena pack: binds the cell (score,
+    /// tc, dealer, rules, deal count) AND this subgame's exact boundary seeds,
+    /// so a directory left over from another run can never be mistaken for
+    /// this one's.
+    pack_sig: u64,
     /// Structural stats (for the report / largest).
     stats: SubgameStats,
+}
+
+/// Where each round gets a subgame's local arena.
+///
+/// Rebuilding is the dominant per-round cost at scale — 3.77 B nodes of arena
+/// re-walked through the engine EVERY round at 0×0 — and keeping all 3,135
+/// arenas in RAM is exactly what the deep path cannot afford. `Cache` is the
+/// middle: pack each arena to disk on its first build, then memory-map it.
+/// The node/edge arenas (45 GB at 0×0) then cost page cache, not RSS; only the
+/// info-set registry is still decoded per use, because the sweep reads
+/// `info_sets[table_idx].1.player`.
+#[derive(Clone, Copy)]
+pub(crate) enum ArenaMode<'a> {
+    /// Replay the boundary seeds and rebuild every round (lowest RSS).
+    Rebuild,
+    /// Hold every arena in RAM across rounds (`--keep-arenas`).
+    Keep,
+    /// Pack to `dir` on first build, mmap afterwards (`--arena-cache DIR`).
+    Cache(&'a Path),
 }
 
 /// Borrow the cached arena (kept mode) or hold a freshly built one — avoids a
@@ -166,16 +201,57 @@ impl ArenaRef<'_> {
     }
 }
 
+fn pack_path(dir: &Path, si: usize) -> std::path::PathBuf {
+    dir.join(format!("sg-{si:06}.pack"))
+}
+
+/// Build one subgame's local arena, or map it back from the arena cache.
+///
+/// A mapped arena is BIT-IDENTICAL to the rebuilt one (the pack stores the
+/// packed node/edge buffers verbatim plus the registry in build order), so a
+/// cached run reproduces a rebuild run's sweeps exactly — asserted by
+/// `deep_arena_cache_matches_rebuild`. A missing / stale / corrupt pack falls
+/// back to a rebuild rather than failing the run: the cache is an optimization,
+/// never a source of truth.
+fn build_or_load_arena(
+    si: usize,
+    seeds: &[(u32, Box<[u8]>, f64)],
+    dealer: Player,
+    pack_sig: u64,
+    mode: ArenaMode<'_>,
+    ctx: ReplayCtx<'_>,
+) -> PrebuiltTrees {
+    if let ArenaMode::Cache(dir) = mode {
+        let path = pack_path(dir, si);
+        if path.exists() {
+            if let Ok(pb) = crate::treepack::load_pack(&path, pack_sig) {
+                return pb;
+            }
+        }
+        let states = ctx.materialize(seeds, dealer);
+        let pb = game_tree::build_subgame_local(&states, dealer).expect("subgame build");
+        if let Err(e) = crate::treepack::save_pack(&path, &pb, pack_sig) {
+            eprintln!("DEEP_WARN arena_cache_write si={si} err={e}");
+        }
+        return pb;
+    }
+    let states = ctx.materialize(seeds, dealer);
+    game_tree::build_subgame_local(&states, dealer).expect("subgame build")
+}
+
 impl SubgameState {
-    /// Local arena for this round: cached if kept, else replayed + built.
-    fn arena(&self, keep: bool, ctx: ReplayCtx<'_>) -> ArenaRef<'_> {
-        if keep {
-            ArenaRef::Borrowed(self.arena.as_ref().expect("kept arena"))
-        } else {
-            let states = ctx.materialize(&self.seeds, self.dealer);
-            let (pb, _) =
-                game_tree::build_subgame_local(&states, self.dealer).expect("subgame build");
-            ArenaRef::Owned(pb)
+    /// Local arena for this round: kept, mapped from the cache, or rebuilt.
+    fn arena(&self, si: usize, mode: ArenaMode<'_>, ctx: ReplayCtx<'_>) -> ArenaRef<'_> {
+        match mode {
+            ArenaMode::Keep => ArenaRef::Borrowed(self.arena.as_ref().expect("kept arena")),
+            _ => ArenaRef::Owned(build_or_load_arena(
+                si,
+                &self.seeds,
+                self.dealer,
+                self.pack_sig,
+                mode,
+                ctx,
+            )),
         }
     }
 }
@@ -203,10 +279,38 @@ fn group_subgames(crossings: Vec<TrunkCrossing>) -> Vec<Vec<TrunkCrossing>> {
     keyed.into_iter().map(|(_, m)| m).collect()
 }
 
-/// Build the persistent [`SubgameState`] for one subgame's crossings.
+/// Content hash binding an arena pack to the exact subtree it was built from.
+fn subgame_pack_sig(ctx: ReplayCtx<'_>, dealer: Player, seeds: &[(u32, Box<[u8]>, f64)]) -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    // Fixed seeds: a resumed run in a LATER PROCESS must recognize its own
+    // cache, so this hash cannot be process-randomized (same discipline as
+    // `treepack::sig_hash` and `InfoSet::key`).
+    let mut h = ahash::RandomState::with_seeds(1, 2, 3, 4).build_hasher();
+    (
+        ctx.score.zero,
+        ctx.score.one,
+        ctx.tc.blocked_plain_level,
+        dealer,
+        ctx.deals.len(),
+        ctx.rules as u8,
+        seeds.len(),
+    )
+        .hash(&mut h);
+    for (deal_idx, path, w) in seeds {
+        deal_idx.hash(&mut h);
+        path.hash(&mut h);
+        w.to_bits().hash(&mut h);
+    }
+    crate::treepack::subgame_pack_sig(h.finish())
+}
+
+/// Build the persistent [`SubgameState`] for one subgame's crossings. This is
+/// every subgame's FIRST arena build, so it is also where the arena cache is
+/// populated — later rounds map the pack instead of replaying the engine.
 fn init_subgame(
     members: Vec<TrunkCrossing>,
-    keep_arenas: bool,
+    si: usize,
+    arenas: ArenaMode<'_>,
     ctx: ReplayCtx<'_>,
 ) -> SubgameState {
     let dealer = members[0].dealer;
@@ -214,9 +318,17 @@ fn init_subgame(
         .iter()
         .map(|m| (m.deal_idx, m.path.clone(), m.deal_weight))
         .collect();
+    let pack_sig = subgame_pack_sig(ctx, dealer, &seeds);
     let states = ctx.materialize(&seeds, dealer);
-    let (arena, key_to_local) =
-        game_tree::build_subgame_local(&states, dealer).expect("subgame build");
+    let arena = game_tree::build_subgame_local(&states, dealer).expect("subgame build");
+    if let ArenaMode::Cache(dir) = arenas {
+        let path = pack_path(dir, si);
+        if !path.exists() {
+            if let Err(e) = crate::treepack::save_pack(&path, &arena, pack_sig) {
+                eprintln!("DEEP_WARN arena_cache_write si={si} err={e}");
+            }
+        }
+    }
     let n_local = arena.info_sets.len();
     let dense = cfr::new_resolve_accum(&arena);
     let trees = subgame::flat_trees(&arena);
@@ -236,10 +348,13 @@ fn init_subgame(
         view: members.iter().map(|m| [m.view_p0, m.view_p1]).collect(),
         seeds,
         n_local,
-        key_to_local,
         member_nodes,
         dense,
-        arena: if keep_arenas { Some(arena) } else { None },
+        arena: match arenas {
+            ArenaMode::Keep => Some(arena),
+            _ => None,
+        },
+        pack_sig,
         stats,
     }
 }
@@ -304,7 +419,8 @@ fn build_boundary_per_tree(
 #[allow(clippy::too_many_arguments)]
 fn subgame_round(
     sg: &mut SubgameState,
-    keep_arenas: bool,
+    si: usize,
+    arenas: ArenaMode<'_>,
     reach_unit: &HashMap<u32, [Vec<f64>; 2]>,
     reach_dw: &HashMap<u32, [Vec<f64>; 2]>,
     sub_iter_base: u64,
@@ -317,14 +433,12 @@ fn subgame_round(
     // Disjoint field borrows: `arena` reads `sg.arena`/`sg.seeds`, the sweep
     // mutates `sg.dense` — accessed as separate fields (not via `&self`).
     let owned_arena;
-    let arena: &PrebuiltTrees = if keep_arenas {
-        sg.arena.as_ref().expect("kept arena")
-    } else {
-        let states = ctx.materialize(&sg.seeds, sg.dealer);
-        owned_arena = game_tree::build_subgame_local(&states, sg.dealer)
-            .expect("subgame build")
-            .0;
-        &owned_arena
+    let arena: &PrebuiltTrees = match arenas {
+        ArenaMode::Keep => sg.arena.as_ref().expect("kept arena"),
+        mode => {
+            owned_arena = build_or_load_arena(si, &sg.seeds, sg.dealer, sg.pack_sig, mode, ctx);
+            &owned_arena
+        }
     };
     let n_members = sg.trunk_node.len();
     let subgame_infosets: Vec<u32> = (0..sg.n_local as u32).collect();
@@ -401,7 +515,7 @@ fn deep_exploitability(
     trunk: &PrebuiltTrees,
     trunk_rows: &[ActionProbs],
     subgames: &[SubgameState],
-    keep_arenas: bool,
+    arenas: ArenaMode<'_>,
     sg_rows: &SubgameRows,
     trunk_avg_reach: &HashMap<u32, [Vec<f64>; 2]>,
     n_trees: usize,
@@ -416,7 +530,7 @@ fn deep_exploitability(
     // extra memory ≈ jobs × largest-subgame arena. Determinism: the per-tree
     // inject lists are sorted by node id below, so fold order is irrelevant.
     let per_sg = |(si, sg): (usize, &SubgameState)| -> [Vec<(u32, game_tree::NodeId, f64)>; 2] {
-        let arena = sg.arena(keep_arenas, ctx);
+        let arena = sg.arena(si, arenas, ctx);
         let a = arena.get();
         let n_members = sg.trunk_node.len();
         let member_nodes: Vec<(u32, game_tree::NodeId)> =
@@ -486,7 +600,7 @@ fn deep_exploitability(
 /// value), per flat trunk tree, sorted.
 fn composed_boundary_p0(
     subgames: &[SubgameState],
-    keep_arenas: bool,
+    arenas: ArenaMode<'_>,
     sg_rows: &SubgameRows,
     n_trees: usize,
     score: &Score,
@@ -495,7 +609,7 @@ fn composed_boundary_p0(
 ) -> Vec<Vec<(game_tree::NodeId, f64)>> {
     let mut per_tree = vec![Vec::new(); n_trees];
     for (si, sg) in subgames.iter().enumerate() {
-        let arena = sg.arena(keep_arenas, ctx);
+        let arena = sg.arena(si, arenas, ctx);
         let n_members = sg.trunk_node.len();
         let member_nodes: Vec<(u32, game_tree::NodeId)> =
             (0..n_members).map(|i| (i as u32, 0)).collect();
@@ -514,6 +628,116 @@ fn composed_boundary_p0(
         v.sort_by_key(|&(n, _)| n);
     }
     per_tree
+}
+
+// ─── Composed-artifact streaming ───────────────────────────────────────────
+
+/// Where [`deep_solve`] should put the composed profile.
+///
+/// `File` is the production path: rows stream to disk subgame by subgame and
+/// nothing whole-profile is ever resident. `Memory` exists for tests at toy
+/// scale — at 0×0 the map it builds is ~757 M rows (the 2026-07-23
+/// post-certificate OOM), so production callers must not use it.
+pub enum ArtifactSink<'a> {
+    File(&'a Path),
+    Memory(&'a mut HashMap<u64, ActionProbs>),
+}
+
+enum SinkImpl<'a> {
+    File(crate::storage::StrategyRowWriter),
+    Memory(&'a mut HashMap<u64, ActionProbs>),
+}
+
+impl SinkImpl<'_> {
+    fn row(
+        &mut self,
+        key: InfoSetKey,
+        info: &crate::info_set::InfoSet,
+        actions: &[crate::info_set::AbstractAction],
+        probs: &ActionProbs,
+    ) {
+        match self {
+            SinkImpl::File(w) => w
+                .write_row(key.0, info, actions, &probs[..])
+                .expect("stream composed row"),
+            SinkImpl::Memory(m) => {
+                m.insert(key.0, probs.clone());
+            }
+        }
+    }
+
+    fn finish(self) {
+        if let SinkImpl::File(w) = self {
+            w.finish().expect("finish composed artifact");
+        }
+    }
+}
+
+/// Trunk info-set indices that are INERT boundary roots: the trunk registers
+/// them (each crossing is a truncated `Player` leaf) but never trains them, and
+/// the owning subgame's local registry holds the same key with the trained row.
+/// Excluding them from the trunk half of the stream makes the composed artifact
+/// duplicate-free — i.e. exactly the key set the old in-memory composition
+/// produced with `entry().or_insert()`.
+fn inert_boundary_infosets(trunk: &PrebuiltTrees, subgames: &[SubgameState]) -> Vec<bool> {
+    let trees = subgame::flat_trees(trunk);
+    let mut inert = vec![false; trunk.info_sets.len()];
+    for sg in subgames {
+        for i in 0..sg.trunk_node.len() {
+            let (tree, _d, _w) = trees[sg.trunk_tree_idx[i] as usize];
+            if let game_tree::NodeView::Player { table_idx, .. } = tree.view(sg.trunk_node[i]) {
+                inert[table_idx as usize] = true;
+            }
+        }
+    }
+    inert
+}
+
+/// Stream the composed profile (trunk rows first, then each subgame's rows in
+/// subgame-index order) into `sink`. Subgame arenas are materialized ONE AT A
+/// TIME in rebuild mode, so peak RSS is trunk + accumulators + one arena — the
+/// whole point: no whole-profile map, no cloned [`SubgameRows`].
+#[allow(clippy::too_many_arguments)]
+fn stream_composed(
+    trunk: &PrebuiltTrees,
+    trunk_avg: &[ActionProbs],
+    subgames: &[SubgameState],
+    arenas: ArenaMode<'_>,
+    best_rows: &SubgameRows,
+    sink: ArtifactSink<'_>,
+    mut meta: crate::storage::SolvedStateMeta,
+    ctx: ReplayCtx<'_>,
+) -> u64 {
+    let inert = inert_boundary_infosets(trunk, subgames);
+    let trunk_rows = inert.iter().filter(|&&b| !b).count() as u64;
+    let sub_rows: u64 = subgames.iter().map(|s| s.n_local as u64).sum();
+    let total_rows = trunk_rows + sub_rows;
+    // Duplicate-free by construction (inert trunk roots dropped), so the row
+    // count IS the distinct info-set count the meta header advertises.
+    meta.num_info_sets = total_rows as usize;
+
+    let mut sink = match sink {
+        ArtifactSink::File(path) => SinkImpl::File(
+            crate::storage::StrategyRowWriter::create(path, meta, total_rows)
+                .expect("create composed artifact"),
+        ),
+        ArtifactSink::Memory(m) => SinkImpl::Memory(m),
+    };
+
+    for (idx, (key, info, actions)) in trunk.info_sets.iter().enumerate() {
+        if inert[idx] {
+            continue;
+        }
+        sink.row(*key, info, actions, &trunk_avg[idx]);
+    }
+    for (si, sg) in subgames.iter().enumerate() {
+        let arena = sg.arena(si, arenas, ctx);
+        for (local, (key, info, actions)) in arena.get().info_sets.iter().enumerate() {
+            sink.row(*key, info, actions, &best_rows[si][local]);
+        }
+    }
+    sink.finish();
+    total_rows
 }
 
 // ─── Checkpoint ────────────────────────────────────────────────────────────
@@ -618,9 +842,11 @@ fn nan_report(subgames: usize) -> DeepReport {
 }
 
 /// From-scratch deep CFR-D solve. `deals` / `dealer` / `rules` must be the
-/// inputs the caller intends (the trunk arena is built here). Returns the
-/// composed profile keyed by info-set key (subgame rows override the inert
-/// trunk boundary roots) plus the report.
+/// inputs the caller intends (the trunk arena is built here).
+///
+/// The composed profile (subgame rows override the inert trunk boundary roots)
+/// is written to `artifact` if one is given — streamed subgame by subgame, so
+/// nothing whole-profile is ever resident. `None` skips composition entirely.
 #[allow(clippy::too_many_arguments)]
 pub fn deep_solve(
     score: &Score,
@@ -631,7 +857,9 @@ pub fn deep_solve(
     match_values: &crate::match_value::MatchValueTable,
     cfg: DeepConfig,
     checkpoint: Option<&CheckpointCfg>,
-) -> (DeepReport, HashMap<u64, ActionProbs>) {
+    arena_cache: Option<&Path>,
+    artifact: Option<ArtifactSink<'_>>,
+) -> DeepReport {
     let t0 = std::time::Instant::now();
     // Optional bounded worker pool (jobs==1 → run on the calling thread).
     let pool = if cfg.jobs > 1 {
@@ -652,6 +880,16 @@ pub fn deep_solve(
         rules,
     };
 
+    // `--keep-arenas` (all in RAM) wins over the disk cache when both are set.
+    let arenas = if cfg.keep_arenas {
+        ArenaMode::Keep
+    } else if let Some(dir) = arena_cache {
+        std::fs::create_dir_all(dir).expect("create arena cache dir");
+        ArenaMode::Cache(dir)
+    } else {
+        ArenaMode::Rebuild
+    };
+
     // 1. Trunk arena + boundary crossings.
     let trunk_arena = game_tree::build_trunk_arena(score, tc, deals, Some(dealer), rules)
         .expect("trunk arena build");
@@ -663,7 +901,8 @@ pub fn deep_solve(
     let groups = group_subgames(trunk_arena.crossings);
     let mut subgames: Vec<SubgameState> = groups
         .into_iter()
-        .map(|m| init_subgame(m, cfg.keep_arenas, ctx))
+        .enumerate()
+        .map(|(si, m)| init_subgame(m, si, arenas, ctx))
         .collect();
     let subgame_info_sets: usize = subgames.iter().map(|s| s.n_local).sum();
 
@@ -680,6 +919,9 @@ pub fn deep_solve(
         }
     }
 
+    // Warm-up anchor: the round at which averaging restarts and the CBV tail
+    // window opens. Always derived from the CURRENT `--rounds`, including on a
+    // resume that extends the budget — see the resume block.
     let warmup = cfg.rounds / 2;
     let mut trunk_iter: u64 = 0;
     let mut sub_iter_base: u64 = 0;
@@ -713,7 +955,15 @@ pub fn deep_solve(
             assert_eq!(saved.tc_level, tc.blocked_plain_level, "checkpoint tc echo");
             assert_eq!(saved.dealer, dealer, "checkpoint dealer echo");
             assert_eq!(saved.deal_count, deals.len(), "checkpoint deal-count echo");
-            assert_eq!(saved.rounds, cfg.rounds, "checkpoint rounds echo");
+            // RESUME-EXTEND: the round budget may GROW ("solve to eps=0.01
+            // now, extend to 2.5e-4 later" — iterations compose additively).
+            // It may never shrink below what is already complete.
+            assert!(
+                cfg.rounds >= saved.next_round,
+                "checkpoint has {} rounds complete; --rounds {} would discard work",
+                saved.next_round,
+                cfg.rounds
+            );
             assert_eq!(
                 saved.trunk_iters, cfg.trunk_iters,
                 "checkpoint trunk_iters echo"
@@ -722,7 +972,33 @@ pub fn deep_solve(
                 saved.subgame_iters, cfg.subgame_iters,
                 "checkpoint subgame_iters echo"
             );
-            assert_eq!(saved.warmup, warmup, "checkpoint warmup echo");
+            // The warm-up anchor is RE-DERIVED from the new `--rounds`, not
+            // taken from the checkpoint. The alternative (keep `saved.warmup`)
+            // leaves an extended run averaging and folding CBVs from the
+            // ORIGINAL, far less converged midpoint: measured 0.067 raw eps
+            // for a 3→6 extension against 0.0132 for a straight 6-round run on
+            // the toy cell — the 2026-07-21 lagging-average family of error.
+            //
+            // Re-anchoring is only safe because the anchor CLEARS the CBV
+            // numerator/denominator maps as well as the strategy sums (see the
+            // `round == warmup` block). Without that clear, the tail window
+            // would open on top of CBV mass folded before the new anchor —
+            // double-counting pre-warmup mass into a window that must start
+            // empty. With it, an extension is EXACTLY a straight run of the new
+            // length: the regret state is iteration-count-independent here
+            // (regret pruning is off on this path, so `iteration` only weights
+            // the strategy sum, which the anchor discards), so
+            // `deep_resume_extend_matches_straight_run` holds bit-for-bit.
+            //
+            // Degradation is graceful: extending PAST the new midpoint (new
+            // rounds < 2 × completed rounds) simply never fires the anchor
+            // again and keeps the original window.
+            if saved.warmup != warmup {
+                eprintln!(
+                    "DEEP_PHASE warmup_reanchored from={} to={} completed={}",
+                    saved.warmup, warmup, saved.next_round
+                );
+            }
             assert_eq!(
                 saved.subgame_count,
                 subgames.len(),
@@ -764,6 +1040,15 @@ pub fn deep_solve(
             }
             trunk_iter = 0;
             sub_iter_base = 0;
+            // The tail window must OPEN EMPTY. In a straight run these maps are
+            // already empty (folding starts at `warmup`), so this is a no-op;
+            // on a resume that extended the budget it discards the shorter
+            // run's tail folds, which is what makes an extension equivalent to
+            // having asked for the longer run up front.
+            for o in 0..2 {
+                cbv_num[o].clear();
+                cbv_den[o].clear();
+            }
         }
 
         // Trunk phase (single-threaded).
@@ -788,10 +1073,11 @@ pub fn deep_solve(
         let fold_cbv = round >= warmup;
         // Subgame phase (parallel over subgames; each dense/arena is disjoint).
         let run = |subgames: &mut [SubgameState]| -> Vec<RoundContribs> {
-            let f = |sg: &mut SubgameState| {
+            let f = |(si, sg): (usize, &mut SubgameState)| {
                 subgame_round(
                     sg,
-                    cfg.keep_arenas,
+                    si,
+                    arenas,
                     &reach_unit,
                     &reach_dw,
                     sub_iter_base,
@@ -805,9 +1091,9 @@ pub fn deep_solve(
             if cfg.jobs > 1 {
                 pool.as_ref()
                     .unwrap()
-                    .install(|| subgames.par_iter_mut().map(f).collect())
+                    .install(|| subgames.par_iter_mut().enumerate().map(f).collect())
             } else {
-                subgames.iter_mut().map(f).collect()
+                subgames.iter_mut().enumerate().map(f).collect()
             }
         };
         let contribs = run(&mut subgames);
@@ -878,7 +1164,7 @@ pub fn deep_solve(
         t_round = std::time::Instant::now();
         if stop_here {
             // Chunked run: state is checkpointed; the final chunk does recovery.
-            return (nan_report(subgames.len()), HashMap::new());
+            return nan_report(subgames.len());
         }
     }
 
@@ -914,6 +1200,25 @@ pub fn deep_solve(
         }
     }
 
+    // Certificate pool: bounded independently of the round pool (see
+    // `DeepConfig::cert_jobs`). Reuse the round pool when the counts agree so
+    // the common case does not allocate a second thread set.
+    let cert_pool_owned = if cfg.cert_jobs > 1 && cfg.cert_jobs != cfg.jobs {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(cfg.cert_jobs)
+                .build()
+                .expect("rayon cert pool"),
+        )
+    } else {
+        None
+    };
+    let cert_pool: Option<&rayon::ThreadPool> = if cfg.cert_jobs > 1 {
+        cert_pool_owned.as_ref().or(pool.as_ref())
+    } else {
+        None
+    };
+
     let compute_eps = |sg_rows: &SubgameRows| -> f64 {
         if !cfg.certify {
             return f64::NAN;
@@ -922,14 +1227,14 @@ pub fn deep_solve(
             &trunk,
             &trunk_avg,
             &subgames,
-            cfg.keep_arenas,
+            arenas,
             sg_rows,
             &trunk_avg_reach,
             n_trees,
             score,
             match_values,
             ctx,
-            pool.as_ref(),
+            cert_pool,
         )
     };
 
@@ -944,7 +1249,7 @@ pub fn deep_solve(
         // Recovery A: gadget re-solve from the tail-averaged CBVs.
         let tail_rows = recover(
             &subgames,
-            cfg.keep_arenas,
+            arenas,
             &raw_rows,
             &cbv_tail,
             &trunk_avg_reach,
@@ -958,7 +1263,7 @@ pub fn deep_solve(
         // Recovery B: gadget re-solve from BR-based CBVs against the raw profile.
         let cbv_br = br_cbvs(
             &subgames,
-            cfg.keep_arenas,
+            arenas,
             &raw_rows,
             &trunk_avg_reach,
             score,
@@ -967,7 +1272,7 @@ pub fn deep_solve(
         );
         let br_rows = recover(
             &subgames,
-            cfg.keep_arenas,
+            arenas,
             &raw_rows,
             &cbv_br,
             &trunk_avg_reach,
@@ -987,8 +1292,9 @@ pub fn deep_solve(
         )
     };
 
-    // Best certified profile.
-    let (best_rows, composed_eps) = {
+    // Best certified profile — BORROWED, never cloned (at 0×0 a clone is a
+    // second ~757 M-row copy of the whole subgame profile).
+    let (best_rows, composed_eps): (&SubgameRows, f64) = {
         let mut best: (&SubgameRows, f64) = (&raw_rows, raw_eps);
         if cfg.certify && cfg.certify_recoveries {
             if composed_eps_tail < best.1 {
@@ -998,14 +1304,14 @@ pub fn deep_solve(
                 best = (&br_rows, composed_eps_br);
             }
         }
-        (best.0.clone(), best.1)
+        best
     };
 
     // Decomposed game value of the certified profile.
     let inject_p0 = composed_boundary_p0(
         &subgames,
-        cfg.keep_arenas,
-        &best_rows,
+        arenas,
+        best_rows,
         n_trees,
         score,
         match_values,
@@ -1038,21 +1344,32 @@ pub fn deep_solve(
     let baseline_visits = 2 * n_full * cfg.baseline_iters;
     let multiplier = total_visits as f64 / baseline_visits.max(1) as f64;
 
-    // 5. Compose keyed profile (subgame rows override inert trunk boundary roots).
-    let mut composed: HashMap<u64, ActionProbs> =
-        HashMap::with_capacity(subgame_info_sets + n_trunk_info);
-    for (si, sg) in subgames.iter().enumerate() {
-        for (key, &local) in &sg.key_to_local {
-            composed.insert(key.0, best_rows[si][local as usize].clone());
-        }
-    }
-    for (idx, (key, _, _)) in trunk.info_sets.iter().enumerate() {
-        composed
-            .entry(key.0)
-            .or_insert_with(|| trunk_avg[idx].clone());
+    // 5. Compose the profile straight into the caller's sink (streamed).
+    if let Some(sink) = artifact {
+        let t_art = std::time::Instant::now();
+        let rows = stream_composed(
+            &trunk,
+            &trunk_avg,
+            &subgames,
+            arenas,
+            best_rows,
+            sink,
+            crate::storage::SolvedStateMeta {
+                score: (score.zero, score.one),
+                turnup_class: tc,
+                iterations: (cfg.rounds as u64) * (cfg.trunk_iters + cfg.subgame_iters)
+                    + cfg.final_iters,
+                num_info_sets: 0,
+            },
+            ctx,
+        );
+        eprintln!(
+            "DEEP_PHASE artifact_s={:.1} rows={rows}",
+            t_art.elapsed().as_secs_f64()
+        );
     }
 
-    let report = DeepReport {
+    DeepReport {
         raw_eps,
         composed_eps_tail,
         composed_eps_br,
@@ -1070,8 +1387,7 @@ pub fn deep_solve(
         multiplier,
         trunk_info_sets: n_trunk_info,
         subgame_info_sets,
-    };
-    (report, composed)
+    }
 }
 
 /// Gadget re-solve every subgame from `cbv` (both players) starting from
@@ -1079,7 +1395,7 @@ pub fn deep_solve(
 #[allow(clippy::too_many_arguments)]
 fn recover(
     subgames: &[SubgameState],
-    keep_arenas: bool,
+    arenas: ArenaMode<'_>,
     base_rows: &SubgameRows,
     cbv: &[HashMap<InfoSetKey, Option<f64>>; 2],
     trunk_avg_reach: &HashMap<u32, [Vec<f64>; 2]>,
@@ -1092,7 +1408,7 @@ fn recover(
         .iter()
         .enumerate()
         .map(|(si, sg)| {
-            let arena = sg.arena(keep_arenas, ctx);
+            let arena = sg.arena(si, arenas, ctx);
             resolve_one(
                 sg,
                 arena.get(),
@@ -1159,7 +1475,7 @@ fn resolve_one(
 /// deep run's own raw profile). Aggregated per opponent view.
 fn br_cbvs(
     subgames: &[SubgameState],
-    keep_arenas: bool,
+    arenas: ArenaMode<'_>,
     raw_rows: &SubgameRows,
     trunk_avg_reach: &HashMap<u32, [Vec<f64>; 2]>,
     score: &Score,
@@ -1170,7 +1486,7 @@ fn br_cbvs(
     let mut den: [HashMap<InfoSetKey, f64>; 2] = [HashMap::new(), HashMap::new()];
     // Build each arena once; both opponents' BR read-outs share it.
     for (si, sg) in subgames.iter().enumerate() {
-        let arena = sg.arena(keep_arenas, ctx);
+        let arena = sg.arena(si, arenas, ctx);
         let n_members = sg.trunk_node.len();
         let member_nodes: Vec<(u32, game_tree::NodeId)> =
             (0..n_members).map(|i| (i as u32, 0)).collect();
@@ -1242,6 +1558,7 @@ mod tests {
             final_iters: 80,
             baseline_iters: 90,
             jobs,
+            cert_jobs: jobs,
             keep_arenas: keep,
             certify: true,
             certify_recoveries: true,
@@ -1265,7 +1582,7 @@ mod tests {
         };
         let (_c, full) = crate::resolve::trunk_solve(&built, &score, tc, &mv, &subgames, tcfg);
 
-        let (deep, _composed) = deep_solve(
+        let deep = deep_solve(
             &score,
             tc,
             &deals,
@@ -1273,6 +1590,8 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 1, false),
+            None,
+            None,
             None,
         );
 
@@ -1317,7 +1636,7 @@ mod tests {
     #[test]
     fn deep_jobs_parallel_matches_serial() {
         let (score, tc, deals, mv) = setup(24);
-        let (s1, _) = deep_solve(
+        let s1 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1326,8 +1645,10 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             None,
+            None,
+            None,
         );
-        let (s4, _) = deep_solve(
+        let s4 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1335,6 +1656,8 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 4, false),
+            None,
+            None,
             None,
         );
         assert!(
@@ -1347,12 +1670,15 @@ mod tests {
         assert!((s1.game_value - s4.game_value).abs() < 1e-12);
     }
 
-    /// The `--keep-arenas` toggle produces identical results (only memory /
-    /// speed differ), validating the per-round rebuild against the cached arena.
+    /// Arena-cache gate: `--arena-cache DIR` must reproduce rebuild mode
+    /// BIT-IDENTICALLY. The pack stores the packed node/edge arenas verbatim
+    /// and the registry in build order, so a mapped arena hands the sweeps the
+    /// same bytes the builder did — across all 6 rounds, both recoveries, the
+    /// certificate, and the composed artifact.
     #[test]
-    fn deep_keep_arenas_matches_rebuild() {
+    fn deep_arena_cache_matches_rebuild() {
         let (score, tc, deals, mv) = setup(24);
-        let (rebuild, _) = deep_solve(
+        let rebuild = deep_solve(
             &score,
             tc,
             &deals,
@@ -1361,8 +1687,59 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             None,
+            None,
+            None,
         );
-        let (kept, _) = deep_solve(
+
+        let dir = std::env::temp_dir().join(format!("deep_arenacache_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cached = deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(6, 1, false),
+            None,
+            Some(&dir),
+            None,
+        );
+
+        // The cache was really populated and really used (one pack per subgame).
+        let packs = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(packs, rebuild.subgames, "one arena pack per subgame");
+
+        assert_eq!(rebuild.raw_eps, cached.raw_eps, "raw eps");
+        assert_eq!(rebuild.composed_eps, cached.composed_eps, "composed eps");
+        assert_eq!(
+            rebuild.composed_eps_tail, cached.composed_eps_tail,
+            "tail eps"
+        );
+        assert_eq!(rebuild.composed_eps_br, cached.composed_eps_br, "br eps");
+        assert_eq!(rebuild.game_value, cached.game_value, "game value");
+        assert_eq!(rebuild.subgame_info_sets, cached.subgame_info_sets);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `--keep-arenas` toggle produces identical results (only memory /
+    /// speed differ), validating the per-round rebuild against the cached arena.
+    #[test]
+    fn deep_keep_arenas_matches_rebuild() {
+        let (score, tc, deals, mv) = setup(24);
+        let rebuild = deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(6, 1, false),
+            None,
+            None,
+            None,
+        );
+        let kept = deep_solve(
             &score,
             tc,
             &deals,
@@ -1370,6 +1747,8 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 1, true),
+            None,
+            None,
             None,
         );
         assert!((rebuild.raw_eps - kept.raw_eps).abs() < 1e-12);
@@ -1385,7 +1764,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("deep.ckpt");
 
-        let (straight, _) = deep_solve(
+        let straight = deep_solve(
             &score,
             tc,
             &deals,
@@ -1393,6 +1772,8 @@ mod tests {
             TreeRules::Current,
             &mv,
             cfg(6, 1, false),
+            None,
+            None,
             None,
         );
 
@@ -1403,7 +1784,7 @@ mod tests {
             resume: false,
             stop_after: Some(2),
         };
-        let (_p1, _) = deep_solve(
+        let _p1 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1412,6 +1793,8 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             Some(&ck1),
+            None,
+            None,
         );
         // Chunk 2: resume, run rounds 2..4, checkpoint, stop.
         let ck2 = CheckpointCfg {
@@ -1420,7 +1803,7 @@ mod tests {
             resume: true,
             stop_after: Some(4),
         };
-        let (_p2, _) = deep_solve(
+        let _p2 = deep_solve(
             &score,
             tc,
             &deals,
@@ -1429,6 +1812,8 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             Some(&ck2),
+            None,
+            None,
         );
         // Chunk 3: resume, run rounds 4..6, full recovery + certificate.
         let ck3 = CheckpointCfg {
@@ -1437,7 +1822,7 @@ mod tests {
             resume: true,
             stop_after: None,
         };
-        let (resumed, _) = deep_solve(
+        let resumed = deep_solve(
             &score,
             tc,
             &deals,
@@ -1446,6 +1831,8 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             Some(&ck3),
+            None,
+            None,
         );
 
         assert!(
@@ -1461,12 +1848,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Gate D: the decomposed streaming certificate equals the in-memory
-    /// whole-arena exploitability on the SAME composed profile (exact match).
+    /// Streamed artifact gate: `ArtifactSink::File` writes exactly the profile
+    /// `ArtifactSink::Memory` composes — same key set (duplicate-free: the inert
+    /// trunk boundary roots are dropped in favour of the subgames' trained rows)
+    /// and bit-identical f32 rows through the storage loader.
     #[test]
-    fn deep_streaming_cert_matches_full_arena() {
+    fn deep_streamed_artifact_matches_in_memory_profile() {
         let (score, tc, deals, mv) = setup(24);
-        let (deep, composed) = deep_solve(
+        let mut composed: HashMap<u64, ActionProbs> = HashMap::new();
+        deep_solve(
             &score,
             tc,
             &deals,
@@ -1475,6 +1865,177 @@ mod tests {
             &mv,
             cfg(6, 1, false),
             None,
+            None,
+            Some(ArtifactSink::Memory(&mut composed)),
+        );
+
+        let dir = std::env::temp_dir().join(format!("deep_artifact_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("composed.bin");
+        deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(6, 1, false),
+            None,
+            None,
+            Some(ArtifactSink::File(&path)),
+        );
+
+        let mut seen = 0usize;
+        let mut keys: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let meta = crate::storage::stream_strategy_rows(&path, |row| {
+            let key = row.info_set.key();
+            let want = composed
+                .get(&key.0)
+                .unwrap_or_else(|| panic!("streamed key {} absent from the memory sink", key.0));
+            // `save_strategy_rows`/`StrategyRowWriter` normalize by the row sum
+            // before the f32 cast; reproduce that exactly.
+            let total: f64 = want.iter().sum();
+            let expect: Vec<f32> = want.iter().map(|&p| (p / total) as f32).collect();
+            assert_eq!(row.average_strategy, expect, "row {} differs", key.0);
+            assert_eq!(row.actions.len(), want.len());
+            assert!(keys.insert(key.0), "duplicate row for key {}", key.0);
+            seen += 1;
+        })
+        .expect("read streamed artifact");
+
+        assert_eq!(seen, composed.len(), "streamed row count vs in-memory rows");
+        assert_eq!(meta.num_info_sets, seen);
+        assert_eq!(meta.score, (score.zero, score.one));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resume-EXTEND: a checkpoint written by a shorter run continues under a
+    /// larger `--rounds`, and the result is BIT-IDENTICAL to having asked for
+    /// the longer run up front — from either a 2-round or a 3-round
+    /// checkpoint. This is the "solve to eps=0.01 now, extend to 2.5e-4 later
+    /// at zero waste" contract; it holds because the warm-up anchor is
+    /// re-derived from the new budget and clears both the strategy sums and
+    /// the CBV tail window (see the resume block).
+    #[test]
+    fn deep_resume_extend_matches_straight_run() {
+        let (score, tc, deals, mv) = setup(24);
+        let root = std::env::temp_dir().join(format!("deep_extend_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let run = |rounds: usize, ck: Option<&CheckpointCfg>| {
+            deep_solve(
+                &score,
+                tc,
+                &deals,
+                0,
+                TreeRules::Current,
+                &mv,
+                cfg(rounds, 1, false),
+                ck,
+                None,
+                None,
+            )
+        };
+        let ck = |path: &std::path::Path, resume: bool| CheckpointCfg {
+            path: path.to_path_buf(),
+            every: 1,
+            resume,
+            stop_after: None,
+        };
+
+        let straight = run(6, None);
+        for short in [2usize, 3] {
+            let path = root.join(format!("from{short}.ckpt"));
+            run(short, Some(&ck(&path, false)));
+            let extended = run(6, Some(&ck(&path, true)));
+            assert_eq!(
+                extended.raw_eps, straight.raw_eps,
+                "raw eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.composed_eps, straight.composed_eps,
+                "composed eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.composed_eps_tail, straight.composed_eps_tail,
+                "tail eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.composed_eps_br, straight.composed_eps_br,
+                "br eps extending {short}->6"
+            );
+            assert_eq!(
+                extended.game_value, straight.game_value,
+                "game value extending {short}->6"
+            );
+            assert_eq!(extended.total_visits, straight.total_visits);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Shrinking below completed work is still refused.
+    #[test]
+    #[should_panic(expected = "would discard work")]
+    fn deep_resume_cannot_shrink_below_completed_rounds() {
+        let (score, tc, deals, mv) = setup(24);
+        let root = std::env::temp_dir().join(format!("deep_shrink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("deep.ckpt");
+        deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(4, 1, false),
+            Some(&CheckpointCfg {
+                path: path.clone(),
+                every: 1,
+                resume: false,
+                stop_after: None,
+            }),
+            None,
+            None,
+        );
+        deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(2, 1, false),
+            Some(&CheckpointCfg {
+                path,
+                every: 1,
+                resume: true,
+                stop_after: None,
+            }),
+            None,
+            None,
+        );
+    }
+
+    /// Gate D: the decomposed streaming certificate equals the in-memory
+    /// whole-arena exploitability on the SAME composed profile (exact match).
+    #[test]
+    fn deep_streaming_cert_matches_full_arena() {
+        let (score, tc, deals, mv) = setup(24);
+        let mut composed: HashMap<u64, ActionProbs> = HashMap::new();
+        let deep = deep_solve(
+            &score,
+            tc,
+            &deals,
+            0,
+            TreeRules::Current,
+            &mv,
+            cfg(6, 1, false),
+            None,
+            None,
+            Some(ArtifactSink::Memory(&mut composed)),
         );
 
         // Materialize the composed profile against a full arena, aligned to its

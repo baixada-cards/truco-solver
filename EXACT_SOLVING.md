@@ -227,10 +227,24 @@ If resuming, these are the live threads, roughly by promise:
    (~0.0125 pp) is a later ~10×-iterations resume from retained
    checkpoints, not a redo. Caveat: benchmark ran a SYNTHETIC-complete mv
    table (0×0's successors were never solved) — cost transfers exactly,
-   the strategy content is not shippable. Remaining tail:
-   post-fix round-cost pin (~$0.50), streamed artifact write (post-cert
-   OOM fix, pattern known), arena NVMe cache, fleet shape. See
-   `SOLVER_BENCHMARKS.md` 2026-07-23.
+   the strategy content is not shippable. **ENGINEERING TAIL BUILT
+   (2026-07-27, $0 local, `SOLVER_BENCHMARKS.md` 2026-07-27):** the
+   post-certificate OOM is fixed by streaming the composed artifact
+   subgame by subgame (4.35× lower peak RSS at 8×8/2,000 deals, output
+   content-identical, max TV 0.000000 over 3.87 M rows) — which also
+   deleted the per-subgame key→local maps (~30 GB at 0×0); the arena
+   NVMe cache exists as `--arena-cache DIR` and is DEFAULT ON whenever
+   `--checkpoint` is set (3.3–3.7× wall per round at jobs=1 for 0.4–7%
+   peak RSS, against 2.0–2.3× RSS for `--keep-arenas`); `--resume` may
+   now RAISE `--rounds`, and extending a checkpoint is bit-identical to
+   having asked for the longer run up front, so "ε=0.01 now, 2.5e-4
+   later at zero waste" is literal; and `--cert-jobs` (default
+   `min(jobs, 8)`) bounds the memory-critical certificate pool
+   separately. All certificates are unchanged bit-for-bit under every
+   new mode. What remains is spend, not code: the ~$0.50 round-cost
+   pin, the r150 certified cell, the r1500 extension, and an R>1
+   amortization sweep. See `SOLVER_BENCHMARKS.md` 2026-07-23 and
+   2026-07-27, and plan 84's status section.
 
 ---
 

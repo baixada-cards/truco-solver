@@ -52,6 +52,15 @@ pub fn treepack_name(score: &Score, tc: u8, dealer_filter: Option<Player>) -> St
     )
 }
 
+/// Stable identity for a per-subgame arena pack (deep.rs's arena cache). Same
+/// container as a treepack; a different `kind` tag keeps the two from ever
+/// loading as each other, and the caller folds its own build inputs into
+/// `content` so a stale cache directory cannot be mistaken for a fresh one.
+pub fn subgame_pack_sig(content: u64) -> u64 {
+    let state = ahash::RandomState::with_seeds(1, 2, 3, 4);
+    state.hash_one(("subgame-arena", content))
+}
+
 /// Serialize a freshly built tree set. The arenas are written verbatim from
 /// the owned build buffers.
 pub fn save_treepack(
@@ -61,9 +70,26 @@ pub fn save_treepack(
     tc: u8,
     dealer_filter: Option<Player>,
 ) -> Result<(), StorageError> {
+    save_pack(
+        path,
+        prebuilt,
+        sig_hash(&band_signature(score, dealer_filter), tc),
+    )
+}
+
+/// Memory-map a pack written by [`save_pack`], validating `expect_sig`.
+/// Structurally identical to [`load_treepack`] minus the band-signature
+/// derivation — used by the deep path's per-subgame arena cache.
+pub fn load_pack(path: &Path, expect_sig: u64) -> Result<PrebuiltTrees, StorageError> {
+    read_pack(path, expect_sig)
+}
+
+/// Container writer shared by treepacks and per-subgame arena packs. The
+/// arenas are written verbatim from the owned build buffers; `sig` is the
+/// caller's identity word, checked on load.
+pub fn save_pack(path: &Path, prebuilt: &PrebuiltTrees, sig: u64) -> Result<(), StorageError> {
     use std::io::Write;
 
-    let sig = band_signature(score, dealer_filter);
     let info_bin: Vec<u8> = bincode::serialize(
         &prebuilt
             .info_sets
@@ -97,7 +123,7 @@ pub fn save_treepack(
     let header: [u64; HEADER_WORDS] = [
         MAGIC,
         VERSION,
-        sig_hash(&sig, tc),
+        sig,
         n_deals as u64,
         n_nodes,
         n_edges,
@@ -162,6 +188,18 @@ pub fn load_treepack(
     tc: u8,
     dealer_filter: Option<Player>,
 ) -> Result<PrebuiltTrees, StorageError> {
+    let sig = band_signature(score, dealer_filter);
+    read_pack(path, sig_hash(&sig, tc)).map_err(|e| match e {
+        StorageError::Deserialize(m) if m == PACK_SIG_MISMATCH => {
+            StorageError::Deserialize(format!("treepack band-signature mismatch (want {sig})"))
+        }
+        other => other,
+    })
+}
+
+const PACK_SIG_MISMATCH: &str = "pack signature mismatch";
+
+fn read_pack(path: &Path, expect_sig: u64) -> Result<PrebuiltTrees, StorageError> {
     let file = File::open(path).map_err(|e| StorageError::Io(e.to_string()))?;
     // SAFETY: read-only private mapping of a regular file; we validate every
     // offset/length against the mapping size before use. Concurrent external
@@ -183,11 +221,8 @@ pub fn load_treepack(
             "treepack version mismatch".into(),
         ));
     }
-    let sig = band_signature(score, dealer_filter);
-    if word(2)? != sig_hash(&sig, tc) {
-        return Err(StorageError::Deserialize(format!(
-            "treepack band-signature mismatch (want {sig})"
-        )));
+    if word(2)? != expect_sig {
+        return Err(StorageError::Deserialize(PACK_SIG_MISMATCH.into()));
     }
     let n_deals = word(3)? as usize;
     let n_nodes = word(4)? as usize;
