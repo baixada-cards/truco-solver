@@ -4324,13 +4324,13 @@ pub fn run_mccfr_chunk(
     for t in 1..=iterations {
         let traversing = (t % 2) as Player;
 
-        let r: f64 = rng.gen();
+        let r: f64 = rng.random();
         let deal_idx = cumulative_weights
             .partition_point(|&w| w < r)
             .min(deals.len() - 1);
         let deal = &deals[deal_idx];
 
-        let dealer: Player = if rng.gen::<bool>() { 0 } else { 1 };
+        let dealer: Player = if rng.random::<bool>() { 0 } else { 1 };
 
         let state =
             match crate::game_tree::TraversalState::from_deal(dealer, score.clone(), tc, deal) {
@@ -4425,12 +4425,12 @@ pub fn run_mccfr_minibatch_chunk(
             std::collections::HashMap::new();
 
         for _ in 0..batch_size {
-            let r: f64 = rng.gen();
+            let r: f64 = rng.random();
             let deal_idx = cumulative_weights
                 .partition_point(|&weight| weight < r)
                 .min(deals.len() - 1);
             let deal = &deals[deal_idx];
-            let dealer = dealer_filter.unwrap_or_else(|| if rng.gen::<bool>() { 0 } else { 1 });
+            let dealer = dealer_filter.unwrap_or_else(|| if rng.random::<bool>() { 0 } else { 1 });
             let Ok(state) =
                 crate::game_tree::TraversalState::from_deal(dealer, score.clone(), tc, deal)
             else {
@@ -4509,14 +4509,14 @@ pub fn solve_mccfr(
         let traversing = (t % 2) as Player;
 
         // Sample a deal
-        let r: f64 = rng.gen();
+        let r: f64 = rng.random();
         let deal_idx = cumulative_weights
             .partition_point(|&w| w < r)
             .min(deals.len() - 1);
         let deal = &deals[deal_idx];
 
         // Sample dealer (50/50)
-        let dealer: Player = if rng.gen::<bool>() { 0 } else { 1 };
+        let dealer: Player = if rng.random::<bool>() { 0 } else { 1 };
 
         // Build traversal state for this deal
         let state =
@@ -4701,7 +4701,7 @@ fn mccfr_external_sampling(
         node_value
     } else {
         // Opponent: sample one action according to current strategy
-        let r: f64 = rng.gen();
+        let r: f64 = rng.random();
         let mut cumulative = 0.0;
         let mut sampled_idx = num_actions - 1;
         for (i, &prob) in strategy.iter().enumerate() {
@@ -4874,7 +4874,7 @@ fn mccfr_external_sampling_batched(
         }
         node_value
     } else {
-        let r: f64 = rng.gen();
+        let r: f64 = rng.random();
         let mut cumulative = 0.0;
         let mut sampled_idx = actions.len() - 1;
         for (i, &probability) in strategy.iter().enumerate() {
@@ -6004,7 +6004,7 @@ mod tests {
             blocked_plain_level: 0,
         };
         let mv = MatchValueTable::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // MCCFR doesn't build trees upfront, so iteration is fast
         let (table, stats) = solve_mccfr(score.clone(), tc, 5000, &mv, &mut rng);

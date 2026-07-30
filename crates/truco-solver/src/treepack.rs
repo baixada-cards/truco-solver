@@ -10,6 +10,7 @@
 //! pages a larger-than-RAM arena in and out at SSD speed (the deep-state
 //! streaming path). Only the info-set metadata is bincode-decoded.
 
+use crate::bincode_v1;
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::Arc;
@@ -90,7 +91,7 @@ pub fn load_pack(path: &Path, expect_sig: u64) -> Result<PrebuiltTrees, StorageE
 pub fn save_pack(path: &Path, prebuilt: &PrebuiltTrees, sig: u64) -> Result<(), StorageError> {
     use std::io::Write;
 
-    let info_bin: Vec<u8> = bincode::serialize(
+    let info_bin: Vec<u8> = bincode_v1::serialize(
         &prebuilt
             .info_sets
             .iter()
@@ -273,7 +274,7 @@ fn read_pack(path: &Path, expect_sig: u64) -> Result<PrebuiltTrees, StorageError
     }
 
     let info_raw: Vec<(u64, InfoSet, Vec<crate::info_set::AbstractAction>)> =
-        bincode::deserialize(&bytes[info_off..info_off + info_len])
+        bincode_v1::deserialize(&bytes[info_off..info_off + info_len])
             .map_err(|e| StorageError::Deserialize(e.to_string()))?;
     let info_sets = info_raw
         .into_iter()

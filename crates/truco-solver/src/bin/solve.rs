@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+use truco_solver::bincode_v1;
 
 use rand::{rngs::StdRng, SeedableRng};
 use rayon::prelude::*;
@@ -3694,7 +3695,7 @@ fn run_export_chart(args: &[String]) {
         .expect("load .teach");
     let raw = fs::read(&meta_path).expect("read band meta");
     let info_sets: Vec<(u64, InfoSet, Vec<AbstractAction>)> =
-        bincode::deserialize(&raw).expect("decode band meta");
+        bincode_v1::deserialize(&raw).expect("decode band meta");
     assert_eq!(
         info_sets.len(),
         data.n_info_sets(),

@@ -18,7 +18,7 @@ pub struct ActionDistribution {
 impl ActionDistribution {
     /// Sample an action according to the distribution.
     pub fn sample(&self, rng: &mut impl rand::Rng) -> AbstractAction {
-        let r: f64 = rng.gen();
+        let r: f64 = rng.random();
         let mut cumulative = 0.0;
         for &(action, prob) in &self.actions {
             cumulative += prob;

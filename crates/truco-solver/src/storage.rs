@@ -1,3 +1,4 @@
+use crate::bincode_v1;
 use std::collections::HashMap;
 use std::fs;
 use std::io::BufReader;
@@ -191,9 +192,9 @@ pub fn save_strategy_rows<'a, F: AccumElem + 'a>(
     {
         let file = fs::File::create(&tmp_path).map_err(|e| StorageError::Io(e.to_string()))?;
         let mut writer = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
-        bincode::serialize_into(&mut writer, &meta)
+        bincode_v1::serialize_into(&mut writer, &meta)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
-        bincode::serialize_into(&mut writer, &(rows.len() as u64))
+        bincode_v1::serialize_into(&mut writer, &(rows.len() as u64))
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         for (key, info_set, actions, cumulative_strategy) in rows {
             let total: f64 = cumulative_strategy.iter().map(|s| s.to_f64()).sum();
@@ -212,7 +213,7 @@ pub fn save_strategy_rows<'a, F: AccumElem + 'a>(
                 actions,
                 average_strategy,
             };
-            bincode::serialize_into(&mut writer, &entry)
+            bincode_v1::serialize_into(&mut writer, &entry)
                 .map_err(|e| StorageError::Serialize(e.to_string()))?;
         }
         use std::io::Write as _;
@@ -255,9 +256,9 @@ impl StrategyRowWriter {
         let tmp_path = atomic_tmp_path(path);
         let file = fs::File::create(&tmp_path).map_err(|e| StorageError::Io(e.to_string()))?;
         let mut writer = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
-        bincode::serialize_into(&mut writer, &meta)
+        bincode_v1::serialize_into(&mut writer, &meta)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
-        bincode::serialize_into(&mut writer, &expected_rows)
+        bincode_v1::serialize_into(&mut writer, &expected_rows)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         Ok(Self {
             writer,
@@ -294,7 +295,7 @@ impl StrategyRowWriter {
             actions,
             average_strategy,
         };
-        bincode::serialize_into(&mut self.writer, &entry)
+        bincode_v1::serialize_into(&mut self.writer, &entry)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         self.written_rows += 1;
         Ok(())
@@ -345,7 +346,7 @@ pub fn load_strategy(path: &Path) -> Result<(StrategyTable, SolvedStateMeta), St
     let bytes = fs::read(path).map_err(|e| StorageError::Io(e.to_string()))?;
 
     let mut table = StrategyTable::new();
-    match bincode::deserialize::<SerializedStrategyTable>(&bytes) {
+    match bincode_v1::deserialize::<SerializedStrategyTable>(&bytes) {
         Ok(serialized) => {
             for entry in serialized.entries {
                 let avg: Vec<f64> = entry.average_strategy.iter().map(|&x| x as f64).collect();
@@ -366,7 +367,7 @@ pub fn load_strategy(path: &Path) -> Result<(StrategyTable, SolvedStateMeta), St
             Ok((table, serialized.meta))
         }
         Err(_) => {
-            let legacy: LegacySerializedStrategyTable = bincode::deserialize(&bytes)
+            let legacy: LegacySerializedStrategyTable = bincode_v1::deserialize(&bytes)
                 .map_err(|e| StorageError::Deserialize(e.to_string()))?;
             for entry in legacy.entries {
                 let avg: Vec<f64> = entry.average_strategy.iter().map(|&x| x as f64).collect();
@@ -404,12 +405,12 @@ pub fn stream_strategy_rows(
 ) -> Result<SolvedStateMeta, StorageError> {
     let file = fs::File::open(path).map_err(|e| StorageError::Io(e.to_string()))?;
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
-    let meta: SolvedStateMeta = bincode::deserialize_from(&mut reader)
+    let meta: SolvedStateMeta = bincode_v1::deserialize_from(&mut reader)
         .map_err(|e| StorageError::Deserialize(e.to_string()))?;
-    let entry_count: u64 = bincode::deserialize_from(&mut reader)
+    let entry_count: u64 = bincode_v1::deserialize_from(&mut reader)
         .map_err(|e| StorageError::Deserialize(e.to_string()))?;
     for _ in 0..entry_count {
-        let entry: SerializedEntry = bincode::deserialize_from(&mut reader)
+        let entry: SerializedEntry = bincode_v1::deserialize_from(&mut reader)
             .map_err(|e| StorageError::Deserialize(e.to_string()))?;
         if entry.actions.len() != entry.average_strategy.len() {
             return Err(StorageError::Deserialize(
@@ -471,16 +472,16 @@ pub fn load_compact_average_policy(
 ) -> Result<(CompactAveragePolicy, SolvedStateMeta), StorageError> {
     let file = fs::File::open(path).map_err(|e| StorageError::Io(e.to_string()))?;
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
-    let meta: SolvedStateMeta = bincode::deserialize_from(&mut reader)
+    let meta: SolvedStateMeta = bincode_v1::deserialize_from(&mut reader)
         .map_err(|e| StorageError::Deserialize(e.to_string()))?;
-    let entry_count: u64 = bincode::deserialize_from(&mut reader)
+    let entry_count: u64 = bincode_v1::deserialize_from(&mut reader)
         .map_err(|e| StorageError::Deserialize(e.to_string()))?;
     let entry_count = usize::try_from(entry_count)
         .map_err(|_| StorageError::Deserialize("strategy entry count exceeds usize".into()))?;
     let mut entries = HashMap::with_capacity(entry_count);
 
     for _ in 0..entry_count {
-        let entry: SerializedEntry = bincode::deserialize_from(&mut reader)
+        let entry: SerializedEntry = bincode_v1::deserialize_from(&mut reader)
             .map_err(|e| StorageError::Deserialize(e.to_string()))?;
         if entry.actions.len() != entry.average_strategy.len() {
             return Err(StorageError::Deserialize(
@@ -624,9 +625,9 @@ impl CheckpointStream {
     pub(crate) fn open(path: &Path) -> Result<Self, StorageError> {
         let file = fs::File::open(path).map_err(|e| StorageError::Io(e.to_string()))?;
         let mut reader = BufReader::with_capacity(1024 * 1024, file);
-        let meta: CheckpointMeta = bincode::deserialize_from(&mut reader)
+        let meta: CheckpointMeta = bincode_v1::deserialize_from(&mut reader)
             .map_err(|e| StorageError::Deserialize(e.to_string()))?;
-        let entry_count: u64 = bincode::deserialize_from(&mut reader)
+        let entry_count: u64 = bincode_v1::deserialize_from(&mut reader)
             .map_err(|e| StorageError::Deserialize(e.to_string()))?;
         let remaining = usize::try_from(entry_count).map_err(|_| {
             StorageError::Deserialize("checkpoint entry count exceeds usize".into())
@@ -652,7 +653,7 @@ impl CheckpointStream {
         if self.remaining == 0 {
             return Ok(None);
         }
-        let entry: SerializedCheckpointEntry = bincode::deserialize_from(&mut self.reader)
+        let entry: SerializedCheckpointEntry = bincode_v1::deserialize_from(&mut self.reader)
             .map_err(|e| StorageError::Deserialize(e.to_string()))?;
         if entry.actions.len() != entry.cumulative_regret.len()
             || entry.actions.len() != entry.cumulative_strategy.len()
@@ -745,9 +746,9 @@ pub fn save_checkpoint_iter<'a, F: AccumElem + 'a>(
     {
         let file = fs::File::create(&tmp_path).map_err(|e| StorageError::Io(e.to_string()))?;
         let mut writer = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
-        bincode::serialize_into(&mut writer, &meta)
+        bincode_v1::serialize_into(&mut writer, &meta)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
-        bincode::serialize_into(&mut writer, &(rows.len() as u64))
+        bincode_v1::serialize_into(&mut writer, &(rows.len() as u64))
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         // The checkpoint format stays f64 regardless of the in-memory
         // accumulator type: rows widen through reusable scratch buffers, so
@@ -766,7 +767,7 @@ pub fn save_checkpoint_iter<'a, F: AccumElem + 'a>(
                 cumulative_regret: &regret_buf,
                 cumulative_strategy: &strategy_buf,
             };
-            bincode::serialize_into(&mut writer, &entry)
+            bincode_v1::serialize_into(&mut writer, &entry)
                 .map_err(|e| StorageError::Serialize(e.to_string()))?;
         }
         use std::io::Write as _;
@@ -814,7 +815,7 @@ pub fn load_checkpoint(path: &Path) -> Result<(StrategyTable, CheckpointMeta), S
     let bytes = fs::read(path).map_err(|e| StorageError::Io(e.to_string()))?;
 
     let mut table = StrategyTable::new();
-    match bincode::deserialize::<SerializedCheckpoint>(&bytes) {
+    match bincode_v1::deserialize::<SerializedCheckpoint>(&bytes) {
         Ok(serialized) => {
             for entry in serialized.entries {
                 let data = InfoSetData {
@@ -832,7 +833,7 @@ pub fn load_checkpoint(path: &Path) -> Result<(StrategyTable, CheckpointMeta), S
             Ok((table, serialized.meta))
         }
         Err(_) => {
-            let legacy: LegacySerializedCheckpoint = bincode::deserialize(&bytes)
+            let legacy: LegacySerializedCheckpoint = bincode_v1::deserialize(&bytes)
                 .map_err(|e| StorageError::Deserialize(e.to_string()))?;
             for entry in legacy.entries {
                 for info_set in entry.info_set.expand() {
@@ -862,7 +863,8 @@ pub fn load_checkpoint(path: &Path) -> Result<(StrategyTable, CheckpointMeta), S
 
 /// Save match values to a file.
 pub fn save_match_values(path: &Path, values: &MatchValueTable) -> Result<(), StorageError> {
-    let bytes = bincode::serialize(values).map_err(|e| StorageError::Serialize(e.to_string()))?;
+    let bytes =
+        bincode_v1::serialize(values).map_err(|e| StorageError::Serialize(e.to_string()))?;
     fs::write(path, bytes).map_err(|e| StorageError::Io(e.to_string()))?;
     Ok(())
 }
@@ -873,10 +875,10 @@ pub fn save_match_values(path: &Path, values: &MatchValueTable) -> Result<(), St
 /// that only stored `values`.
 pub fn load_match_values(path: &Path) -> Result<MatchValueTable, StorageError> {
     let bytes = fs::read(path).map_err(|e| StorageError::Io(e.to_string()))?;
-    match bincode::deserialize::<MatchValueTable>(&bytes) {
+    match bincode_v1::deserialize::<MatchValueTable>(&bytes) {
         Ok(t) => Ok(t),
         Err(_) => {
-            let legacy: LegacyMatchValueOnly = bincode::deserialize(&bytes)
+            let legacy: LegacyMatchValueOnly = bincode_v1::deserialize(&bytes)
                 .map_err(|e| StorageError::Deserialize(e.to_string()))?;
             Ok(MatchValueTable::from_values_legacy(legacy.values))
         }
@@ -948,7 +950,7 @@ mod tests {
     }
 
     /// The streaming writers must produce the exact bytes of the historical
-    /// whole-struct `bincode::serialize` layout: same meta, u64 row count,
+    /// whole-struct `bincode_v1::serialize` layout: same meta, u64 row count,
     /// key-sorted entries, f32 averages with the uniform fallback.
     #[test]
     fn streaming_writers_match_whole_struct_serialization() {
@@ -1005,7 +1007,7 @@ mod tests {
             })
             .collect();
         entries.sort_by_key(|entry| entry.key);
-        let expected = bincode::serialize(&SerializedStrategyTable {
+        let expected = bincode_v1::serialize(&SerializedStrategyTable {
             meta: meta.clone(),
             entries,
         })
@@ -1036,7 +1038,7 @@ mod tests {
             })
             .collect();
         entries.sort_by_key(|entry| entry.key);
-        let expected = bincode::serialize(&SerializedCheckpoint {
+        let expected = bincode_v1::serialize(&SerializedCheckpoint {
             meta: ckpt_meta,
             entries,
         })
@@ -1329,7 +1331,7 @@ mod tests {
                 average_strategy: vec![0.75, 0.25],
             }],
         };
-        fs::write(&path, bincode::serialize(&legacy).unwrap()).unwrap();
+        fs::write(&path, bincode_v1::serialize(&legacy).unwrap()).unwrap();
 
         let (table, meta) = load_strategy(&path).unwrap();
         assert_eq!(meta.score, (11, 11));
@@ -1377,7 +1379,7 @@ mod tests {
                 cumulative_strategy: vec![7.0, 3.0],
             }],
         };
-        fs::write(&path, bincode::serialize(&legacy).unwrap()).unwrap();
+        fs::write(&path, bincode_v1::serialize(&legacy).unwrap()).unwrap();
 
         let (table, meta) = load_checkpoint(&path).unwrap();
         assert_eq!(meta.iteration, 77);

@@ -13,6 +13,7 @@
 
 pub mod abstraction;
 pub mod allocation_scout;
+pub mod bincode_v1;
 pub mod bot_policy;
 pub mod cfr;
 pub mod cfr_experiment;
