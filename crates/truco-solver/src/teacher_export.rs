@@ -36,6 +36,7 @@
 use std::fs::{self, File};
 use std::path::Path;
 
+use crate::bincode_v1;
 use crate::cfr::terminal_p0_value;
 use crate::game_tree::{GameTree, NodeId, NodeView, PrebuiltTrees};
 use crate::info_set::{AbstractAction, InfoSet, InfoSetKey};
@@ -766,7 +767,7 @@ pub fn save_band_meta(
 ) -> Result<(), StorageError> {
     let raw: Vec<(u64, &InfoSet, &[AbstractAction])> =
         info_sets.iter().map(|(k, i, a)| (k.0, i, &a[..])).collect();
-    let bytes = bincode::serialize(&raw).map_err(|e| StorageError::Serialize(e.to_string()))?;
+    let bytes = bincode_v1::serialize(&raw).map_err(|e| StorageError::Serialize(e.to_string()))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok();
     }

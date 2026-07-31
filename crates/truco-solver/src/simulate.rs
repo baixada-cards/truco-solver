@@ -193,7 +193,7 @@ fn exact_ev_recursive(
 }
 
 fn sample_turnup_class(rng: &mut impl Rng, classes: &[TurnupClass; 9]) -> usize {
-    let r: f64 = rng.gen();
+    let r: f64 = rng.random();
     let mut cumulative = 0.0;
     for (i, tc) in classes.iter().enumerate() {
         cumulative += tc.weight();
@@ -208,7 +208,7 @@ fn sample_deal<'a>(
     rng: &mut impl Rng,
     deals: &'a [crate::abstraction::AbstractDeal],
 ) -> &'a crate::abstraction::AbstractDeal {
-    let r: f64 = rng.gen();
+    let r: f64 = rng.random();
     let mut cumulative = 0.0;
     for deal in deals {
         cumulative += deal.weight;
@@ -228,7 +228,7 @@ mod tests {
     fn test_always_fold_vs_always_raise() {
         let folder = PureStrategy::always_fold();
         let raiser = PureStrategy::always_raise();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let result = simulate_matchup(Score { zero: 0, one: 0 }, &folder, &raiser, 100, &mut rng);
 
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn test_mirror_strategy_approximately_fair() {
         let strat = PureStrategy::strongest_face_up();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let result = simulate_matchup(Score { zero: 0, one: 0 }, &strat, &strat, 500, &mut rng);
 
@@ -291,7 +291,7 @@ mod tests {
         // because face-down cards always lose to face-up cards.
         let hider = PureStrategy::weakest_then_hide();
         let open = PureStrategy::strongest_face_up();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let result = simulate_matchup(Score { zero: 0, one: 0 }, &hider, &open, 200, &mut rng);
 

@@ -7,6 +7,16 @@ and releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded `rand` 0.8 → 0.9.5 (includes the 0.9.5 `UniformChar`
+  deserialization memory-safety fix) and `bincode` 1.3 → 2.0.1.
+- All bincode traffic now goes through the `bincode_v1` wrapper module, which
+  pins bincode 2's `config::legacy()` so every artifact keeps bincode 1's
+  exact wire format. Verified byte-identical round-trip against real
+  pre-migration GCS artifacts (match-value table, streamed 10x10 checkpoint,
+  deep-solve checkpoint header) plus golden byte vectors in-tree.
+
 ## [0.1.0] - 2026-07-23
 
 ### Added

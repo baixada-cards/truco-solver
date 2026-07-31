@@ -26,6 +26,7 @@
 //! 2026-07-21 plateau lesson); the arithmetic per node is identical to the
 //! full-arena path, so `--jobs 1` reproduces `trunk_solve`'s certificates.
 
+use crate::bincode_v1;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -782,7 +783,8 @@ fn atomic_write(path: &Path, ckpt: &DeepCheckpoint) -> std::io::Result<()> {
     {
         let file = std::fs::File::create(&tmp)?;
         let mut w = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
-        bincode::serialize_into(&mut w, ckpt).map_err(|e| std::io::Error::other(e.to_string()))?;
+        bincode_v1::serialize_into(&mut w, ckpt)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         use std::io::Write;
         w.flush()?;
     }
@@ -792,7 +794,7 @@ fn atomic_write(path: &Path, ckpt: &DeepCheckpoint) -> std::io::Result<()> {
 fn load_checkpoint(path: &Path) -> std::io::Result<DeepCheckpoint> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::with_capacity(4 * 1024 * 1024, file);
-    bincode::deserialize_from(reader).map_err(|e| std::io::Error::other(e.to_string()))
+    bincode_v1::deserialize_from(reader).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 fn cbv_map_to_vec(m: &HashMap<InfoSetKey, f64>) -> Vec<(u64, f64)> {
