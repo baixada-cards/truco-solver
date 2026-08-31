@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
+use rand::RngExt;
 use truco_engine::{Player, Score, MATCH_TARGET};
 
 use crate::abstraction::{enumerate_deals, AbstractHand, TurnupClass};

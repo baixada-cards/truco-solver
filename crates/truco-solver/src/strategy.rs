@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use rand::RngExt;
 use smallvec::SmallVec;
 
 use crate::info_set::{AbstractAction, InfoSet, InfoSetKey};
