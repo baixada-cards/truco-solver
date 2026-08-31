@@ -22,8 +22,8 @@ Resolve secret references at the process boundary rather than in this module.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_STORE = f"file:{_REPO_ROOT / 'autoresearch' / 'mlruns'}"
@@ -46,7 +46,7 @@ def _clip(value: object) -> str:
     return text if len(text) <= _MAX_VALUE_LEN else text[: _MAX_VALUE_LEN - 1] + "…"
 
 
-def resolve_tracking_uri(env: Optional[dict] = None) -> str:
+def resolve_tracking_uri(env: dict | None = None) -> str:
     import os
 
     e = env if env is not None else os.environ
@@ -75,7 +75,7 @@ class Tracker:
     @classmethod
     def disabled(
         cls, campaign_id: str = "", experiment: str = DEFAULT_EXPERIMENT
-    ) -> "Tracker":
+    ) -> Tracker:
         return cls(None, experiment, campaign_id, "")
 
     @classmethod
@@ -84,8 +84,8 @@ class Tracker:
         *,
         campaign_id: str,
         experiment: str = DEFAULT_EXPERIMENT,
-        env: Optional[dict] = None,
-    ) -> "Tracker":
+        env: dict | None = None,
+    ) -> Tracker:
         """Build a tracker. Returns a disabled (no-op) tracker on any failure."""
         import os
 
@@ -100,7 +100,9 @@ class Tracker:
 
             mlflow.set_tracking_uri(uri)
             mlflow.set_experiment(experiment)
-        except Exception as exc:  # not installed / unreachable / bad config
+        # MLflow integrations can raise provider-specific exceptions; tracking
+        # is deliberately fail-safe and must never stop an experiment.
+        except Exception as exc:  # noqa: BLE001
             _warn(
                 f"tracking disabled (setup failed: {exc}). "
                 f"The research run continues without MLflow. URI was {uri!r}."
@@ -116,8 +118,8 @@ class Tracker:
         status: str,
         description: str,
         result=None,
-        parent_commit: Optional[str] = None,
-        params: Optional[dict] = None,
+        parent_commit: str | None = None,
+        params: dict | None = None,
         artifacts: Sequence[str] = (),
     ) -> None:
         """Log one candidate (baseline or proposal) as its own MLflow run.
@@ -158,7 +160,8 @@ class Tracker:
                 for artifact in artifacts:
                     if artifact and Path(artifact).exists():
                         self._mlflow.log_artifact(str(artifact))
-        except Exception as exc:
+        # A tracking backend failure must not lose the underlying research run.
+        except Exception as exc:  # noqa: BLE001
             _warn(
                 f"log failed for {commit} ({status}): {exc}; "
                 "disabling tracking for the rest of this run."

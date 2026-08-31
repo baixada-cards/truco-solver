@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{Rng, RngExt};
 use truco_engine::{Player, Score};
 
 use crate::abstraction::{enumerate_deals, TurnupClass};

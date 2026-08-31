@@ -11,7 +11,7 @@ import argparse
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from harness import (
@@ -89,13 +89,14 @@ def get_git_log(n: int = 20) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         log = result.stdout.strip()
         # Truncate if too long (keep under 8k chars to leave room in context)
         if len(log) > 8000:
             log = log[:8000] + "\n... (truncated)"
         return log
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"warning: git log unavailable: {e}", file=sys.stderr)
         return "(git log unavailable)"
 
@@ -142,6 +143,7 @@ def git_commit(message: str) -> str:
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -200,6 +202,7 @@ def short_head() -> str:
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
+        check=False,
     ).stdout.strip()
 
 
@@ -256,7 +259,10 @@ def run_loop(config: LLMConfig, time_budget: int, tracker: Tracker):
     while True:
         experiment_num += 1
         log(f"\n{'=' * 60}")
-        log(f"EXPERIMENT #{experiment_num}  [{datetime.now().strftime('%H:%M:%S')}]")
+        log(
+            f"EXPERIMENT #{experiment_num}  "
+            f"[{datetime.now(UTC).strftime('%H:%M:%S UTC')}]"
+        )
         log(f"  provider={config.provider}  model={config.model}")
         log(f"{'=' * 60}")
 
@@ -282,7 +288,9 @@ def run_loop(config: LLMConfig, time_budget: int, tracker: Tracker):
                 git_history=git_history,
             )
             stop_heartbeat("llm", llm_stop, llm_worker, llm_start)
-        except Exception as e:
+        # Provider SDKs expose unrelated exception hierarchies; the loop must
+        # recover from any proposal failure and continue with the next attempt.
+        except Exception as e:  # noqa: BLE001
             if llm_stop is not None and not llm_stop.is_set():
                 stop_heartbeat("llm", llm_stop, llm_worker, llm_start)
             log(f"LLM error: {e}")
@@ -402,7 +410,7 @@ def main():
 
     # MLflow tracking (durable, fail-safe). Defaults to a local file store; set
     # CFR_AUTORESEARCH_MLFLOW_TRACKING_URI / MLFLOW_TRACKING_URI for a server.
-    campaign_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    campaign_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%SZ")
     tracker = (
         Tracker.disabled(campaign_id)
         if args.no_mlflow
