@@ -720,8 +720,10 @@ pub fn load_teach(path: &Path, expect_sig_hash: Option<u64>) -> Result<TeacherDa
             .get(*off..end)
             .ok_or_else(|| StorageError::Deserialize("teach truncated".into()))?;
         let v = s
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().expect("4 bytes")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
         *off = end + if count % 2 == 1 { 4 } else { 0 };
         Ok(v)
@@ -733,8 +735,10 @@ pub fn load_teach(path: &Path, expect_sig_hash: Option<u64>) -> Result<TeacherDa
             .get(*off..end)
             .ok_or_else(|| StorageError::Deserialize("teach truncated".into()))?;
         let v = s
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         *off = end + if count % 2 == 1 { 4 } else { 0 };
         Ok(v)
@@ -883,7 +887,7 @@ pub fn load_br_gaps(
         .ok_or_else(|| StorageError::Deserialize("brgaps truncated body".into()))?;
 
     let mut records = Vec::with_capacity(count);
-    for chunk in body.chunks_exact(RECORD_LEN) {
+    for chunk in body.as_chunks::<RECORD_LEN>().0 {
         let table_idx = u32::from_le_bytes(chunk[0..4].try_into().expect("4 bytes"));
         let br_value = f32::from_le_bytes(chunk[4..8].try_into().expect("4 bytes"));
         let eq_value = f32::from_le_bytes(chunk[8..12].try_into().expect("4 bytes"));
