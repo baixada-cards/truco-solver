@@ -20,6 +20,10 @@ dev = [
 [tool.uv]
 exclude-newer = "7 days"
 package = false
+constraint-dependencies = [
+    "gitpython>=3.1.62",
+    "urllib3>=2.8.0",
+]
 
 [tool.uv.pip]
 exclude-newer = "7 days"
