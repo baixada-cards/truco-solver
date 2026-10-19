@@ -2237,6 +2237,22 @@ ever going to move by construction.
     memory-critical phase (each BR worker holds a whole subgame arena;
     0×0 at jobs=16 peaked at 124.5 GiB of 128), so it gets its own bound.
 
+37. **Procurement decided: rent Netcup, ~$400, don't buy (2026-07-27, plan
+    86).** With every workload constant measured (plan 84's pin), an
+    external provider study — arithmetic-verified against our numbers —
+    landed the full 1v1 exact grid at **~$365–458 on Netcup EPYC-Turin root
+    servers** vs $720–1,600 on the GCP spot baseline, with buy-use-resell
+    non-competitive below ~12,000 additional effective CPU-hours (the 2v2
+    gate). The journey's cost arc closes at three orders of magnitude:
+    ~$505K raw census → $31K (ε relax + warm) → $12–16K (asymmetric prune)
+    → $3–13K (CFR-D, measured) → **~$400 (tail optimizations + cheapest
+    iron)** — every step a measured mechanism, and the original <$1K goal,
+    once "impossible without abandoning exactness," now costs less than a
+    nice dinner per score-band. Plan 86 records the decision, the
+    verify-at-purchase list (the 1.7–1.9× Turin throughput assumption gets
+    measured in hour one), and the 2v2 feasibility benchmark that gates any
+    future hardware purchase.
+
 ---
 
 ## Technical choices worth documenting
