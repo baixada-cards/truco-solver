@@ -251,6 +251,11 @@ Provider/model selection rules:
 - If `AUTORESEARCH_MODEL` is set, it overrides the provider default.
 - Without an override, the OpenAI default is `o3-mini`.
 
+The Anthropic client uses the API's default sampling settings: the installed
+SDK does not accept a `temperature` argument. The OpenAI client continues to
+request temperature `0.7`. `test_llm.py` exercises both installed SDKs through
+an in-memory HTTP transport, without credentials or live API calls.
+
 ## Cloud execution
 
 Cloud workers clone a signed revision of this repository and run the same

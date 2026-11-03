@@ -2274,3 +2274,13 @@ Game with LLM-Assisted Algorithm Research*
    model (future work).
 
 **Venue:** AAAI, IJCAI, NeurIPS Game Theory workshop, or similar.
+
+## 2026-11-02: LLM client compatibility maintenance
+
+An offline request test during the Anthropic 2.3.0 dependency update found that
+the installed SDK rejects the harness's `temperature=0.7` argument. Anthropic
+requests now use the API's default sampling settings; OpenAI requests retain
+their existing temperature. Regression tests exercise the actual installed SDK
+request builders and response parsers using an in-memory HTTP transport. This
+maintenance check made no live provider calls and produced no new experiment
+or benchmark results. Earlier research results remain historical observations.
