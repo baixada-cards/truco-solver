@@ -109,7 +109,6 @@ def _call_anthropic(config: LLMConfig, prompt: str) -> str:
     response = client.messages.create(
         model=config.model,
         max_tokens=8192,
-        temperature=0.7,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.content[0].text
