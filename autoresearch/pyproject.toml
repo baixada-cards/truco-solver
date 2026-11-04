@@ -23,6 +23,7 @@ package = false
 constraint-dependencies = [
     "gitpython>=3.1.62",
     "urllib3>=2.8.0",
+    "pyasn1>=0.6.5",
 ]
 
 [tool.uv.pip]
