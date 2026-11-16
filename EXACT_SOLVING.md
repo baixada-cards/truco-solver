@@ -241,10 +241,15 @@ If resuming, these are the live threads, roughly by promise:
    later at zero waste" is literal; and `--cert-jobs` (default
    `min(jobs, 8)`) bounds the memory-critical certificate pool
    separately. All certificates are unchanged bit-for-bit under every
-   new mode. What remains is spend, not code: the ~$0.50 round-cost
-   pin, the r150 certified cell, the r1500 extension, and an R>1
-   amortization sweep. See `SOLVER_BENCHMARKS.md` 2026-07-23 and
-   2026-07-27, and plan 84's status section.
+   new mode. The round-cost pin then ran (2026-07-27, $0.82):
+   rounds 6.5–9.5 min off the arena cache, ~8× pre-fix — 0×0 r150 ≈ 26
+   box-hours ≈ $6.3 spot, warm whole-grid ≈ 3,000–4,200 box-hours. What
+   remains is spend, not code: the r150 certified cell, the r1500
+   extension, and an R>1 amortization sweep. Procurement is DECIDED in
+   `plans/86-compute-procurement-1v1-campaign.md`: rent Netcup Turin root
+   servers, ~$400 planning figure ($500 ceiling) for the whole ε=0.01
+   grid; buying hardware is gated on a ≥12,000-hour 2v2 program. See
+   `SOLVER_BENCHMARKS.md` 2026-07-23/27 and plan 84's status section.
 
 ---
 
